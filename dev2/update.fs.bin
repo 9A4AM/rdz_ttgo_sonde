@@ -617,7 +617,7 @@ function bearing(latlng1, latlng2) {
     bearing = bearing < 0 ? bearing-360 : bearing;
     return Math.round(bearing);
 }
-upd.html 1340
+upd.html 2141
 <html><head>
 <link rel="stylesheet" type="text/css" href="style.css">
 </head>
@@ -634,9 +634,35 @@ Available dev2: <span id="develDiv">(...checking...)</span>
 </p>
 <input type="submit" name="main" value="Main-Update"></input><br>
 <input type="submit" name="dev2" value="Dev-Update"><br>
-<p>Note: If suffix is the same, update should work fully. If the number is different, update contains changes in the file system. A full re-flash is required to get all new features, but the update should not break anything. If the letter is different, a full re-flash is mandatory, update will not work</p></form>
+<div id="local-update-section">
+  <input type="submit" name="local" value="Local-Update"> from
+  <input type="text" name="url" value="%LOCAL_UPDATES%" size="64"><br>
+</div>
+</form>
+
+<p>Note: If suffix is the same, update should work fully. If the number is
+different, update contains changes in the file system. A full re-flash is
+required to get all new features, but the update should not break anything.
+If the letter is different, a full re-flash is mandatory, update will not
+work.</p>
+<p id="local-update-info">
+The local-update feature is for developers and requires a path containing
+<tt>update.fs.bin</tt> and <tt>update.ino.bin</tt>.
+</p>
 
 <script>
+const localEnabled = "%LOCAL_UPDATES%";
+
+document.addEventListener("DOMContentLoaded", () => {
+  if (localEnabled.trim() === "") {
+    // Hide the local update section
+    const localUpdateSection = document.getElementById("local-update-section");
+    const localUpdateInfo = document.getElementById("local-update-info");
+    if (localUpdateSection) localUpdateSection.style.display = "none";
+    if (localUpdateInfo) localUpdateInfo.style.display = "none";
+  }
+});
+
 const masterInfo = document.getElementById('masterDiv');
 const develInfo = document.getElementById('develDiv');
 
@@ -948,7 +974,7 @@ document.getElementById("defaultTab").click();
 </body>
 </html>
 
-style.css 8450
+style.css 8531
 body, html {
 	height: 100%;
 	margin: 0;
@@ -1148,8 +1174,10 @@ h1{
   text-align: center;
   text-decoration: none;
   display: block;
-  margin: 2;
   font-size: 4vh;
+  margin-top: 0.3em;
+  margin-left: 0.3em;
+  margin-right: 0.3em;
 }
 .update {
   margin: 0;
@@ -1362,7 +1390,10 @@ h1{
 @media (prefers-color-scheme: dark) {
   body {
     background-color: #333;
-  }   
+  }
+  h1{
+    color: #3378f6;
+  } 
   h2{
     color: white;
   }
