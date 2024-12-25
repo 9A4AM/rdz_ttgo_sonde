@@ -86,6 +86,58 @@ sdfiles.html 2549
 </body>
 </html>
 
+login.html 2068
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>rdzTTGOSonde Login</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Login Form</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script src="sha256.min.js" type="text/javascript"></script>
+    <script>
+        function computeHash(event) {
+            event.preventDefault(); // Prevent form's default submission behavior
+            const username = document.getElementById('user').value;
+            const password = document.getElementById('pass').value;
+            const preauth = document.getElementById('preauth').value;
+            const hashInput = `${username}:${preauth}:${password}`;
+            const hash = sha256(hashInput);
+            document.getElementById('auth').value = hash;
+            document.getElementById('pass').value = '';
+            document.getElementById('loginForm').submit();
+        }
+    </script>
+</head>
+<body>
+<div class="wrapper">
+ <div class="header"><div id="myTopnav" class="topnav">
+  <a id="defaultTab" class="tablinks active">Login</a>
+ </div></div>
+ <div id="Login" class="tabcontent" style="display: flex;">
+  <div class="system-info">
+  <h1>%VERSION_NAME% version %VERSION_ID%</h1>
+  <p>Copyright &copy; 2019-2024 by Hansi Reiser, DL9RDZ and contributors</p>
+  <br>
+    <form id="loginForm" action="/login.html" method="POST" onsubmit="computeHash(event)">
+        <label for="user">Username:</label>
+        <input type="text" id="user" name="user" required><br><br>
+        
+        <label for="pass">Password:</label>
+        <input type="password" id="pass" name="pass" required><br><br>
+
+        <input type="hidden" id="preauth" name="preauth" value="%PREAUTH%">
+        <input type="hidden" id="auth" name="auth" value=""> 
+        <button type="submit">Login</button>
+    </form>
+  </div>
+  <div class="footer"><span></span><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
+ </div>
+</div>
+</body>
+</html>
 livemap.js 19784
 try {
   var check = $(document);
@@ -680,7 +732,8 @@ drequest.onload = function() {
 drequest.send();
 </script>
 </body></html>
-rdz.js 3063
+sha256.min.js 849
+var sha256=function a(b){function c(a,b){return a>>>b|a<<32-b}for(var d,e,f=Math.pow,g=f(2,32),h="length",i="",j=[],k=8*b[h],l=a.h=a.h||[],m=a.k=a.k||[],n=m[h],o={},p=2;64>n;p++)if(!o[p]){for(d=0;313>d;d+=p)o[d]=p;l[n]=f(p,.5)*g|0,m[n++]=f(p,1/3)*g|0}for(b+="\x80";b[h]%64-56;)b+="\x00";for(d=0;d<b[h];d++){if(e=b.charCodeAt(d),e>>8)return;j[d>>2]|=e<<(3-d)%4*8}for(j[j[h]]=k/g|0,j[j[h]]=k,e=0;e<j[h];){var q=j.slice(e,e+=16),r=l;for(l=l.slice(0,8),d=0;64>d;d++){var s=q[d-15],t=q[d-2],u=l[0],v=l[4],w=l[7]+(c(v,6)^c(v,11)^c(v,25))+(v&l[5]^~v&l[6])+m[d]+(q[d]=16>d?q[d]:q[d-16]+(c(s,7)^c(s,18)^s>>>3)+q[d-7]+(c(t,17)^c(t,19)^t>>>10)|0),x=(c(u,2)^c(u,13)^c(u,22))+(u&l[1]^u&l[2]^l[1]&l[2]);l=[w+x|0].concat(l),l[4]=l[4]+w|0}for(d=0;8>d;d++)l[d]=l[d]+r[d]|0}for(d=0;8>d;d++)for(e=3;e+1;e--){var y=l[d]>>8*e&255;i+=(16>y?0:"")+y.toString(16)}return i};rdz.js 3063
 let stypes=new Map();
 stypes.set('4', 'RS41');
 stypes.set('R', 'RS92');
@@ -819,7 +872,7 @@ livemap.html 720
   <div id="map"></div>
 </body>
 </html>
-index.html 5230
+index.html 6008
 <!DOCTYPE html>
 <html>
 <head>
@@ -846,7 +899,6 @@ index.html 5230
 </div>
 
 <div id="Home" class="tabcontent">
-<div class="tci">
 <div class="system-info">
 <h1>%VERSION_NAME% version %VERSION_ID%</h1>
 <p>Copyright &copy; 2019-2024 by Hansi Reiser, DL9RDZ and contributors</p>
@@ -872,17 +924,18 @@ index.html 5230
  </tr>
 </tbody>
 </table>
-</div>
+
+<!--</div>
 <div class="external-links">
-<h2>External Sites</h2>
+-->
+<h2 class="external-links">External Sites</h2>
 <div class="link-buttons">
  <a href="https://www.wettersonde.net" target="_blank" class="button">wettersonde.net</a>
  <a href="https://www.radiosondy.info" target="_blank" class="button">radiosondy.info</a>
  <a href="https://www.sondehub.org" target="_blank" class="button">sondehub.org</a>
 </div>
 </div>
-</div>
-<div class="footer"><span></span><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
+<div class="footer"><span class="ttgoinfo" id="userinfo"></span><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
 
 </div>
 
@@ -905,7 +958,7 @@ index.html 5230
 <div id="Control" class="tabcontent" data-src="control.html">
 	<iframe class="tci" src="" ></iframe>
 </div>
-
+</div>
 <script>
 function fetchStatus() {
   fetch('/status.json')
@@ -969,12 +1022,27 @@ function myFunction() {
   }
 }
 document.getElementById("defaultTab").click();
+
+const sessionC  = document.cookie.split("; ").find((row) => row.startsWith("SESSION="))?.split("=")[1];
+if(sessionC) {
+  const [user] = sessionC.split(':');
+  document.getElementById("userinfo").innerHTML = `User: ${user} <a href="#" id="logoutLink" style="margin-left: 10px; color: white;">Logout</a>`;
+  const logoutLink = document.getElementById("logoutLink");
+  logoutLink.addEventListener("click", function(event) {
+     event.preventDefault(); // Prevent default link behavior
+     document.cookie = `SESSION=; expires:Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+     location.reload(); // Reload the page
+  });
+} else {
+  document.getElementById("userinfo").innerHTML = `<a style="color: white;" href="login.html">Login</a>`;
+}
+
 </script>
 
 </body>
 </html>
 
-style.css 8531
+style.css 8566
 body, html {
 	height: 100%;
 	margin: 0;
@@ -984,6 +1052,8 @@ body, html {
 .system-info {
     padding: 20px;
     font-family: Arial, sans-serif;
+    flex-grow: 1;
+    overflow-y: auto;
 }
 .system-info p {
     margin: 8px 0;
@@ -1016,12 +1086,9 @@ body, html {
     color: #007BFF;
 }
 
-.external-links {
+h2.external-links {
     margin-top: 40px;
     text-align: center;
-}
-
-.external-links h2 {
     font-size: 20px;
     margin-bottom: 15px;
 }
@@ -1082,7 +1149,7 @@ table.stat {
   margin: 0;
 }
 .tci {
-  flex-grow: 1; border: none; margin: 0; padding: 0; 
+  flex-grow: 1; border: none; margin: 0; padding: 0; overflow-y: auto;
 }
 .footer {
  background-color: #333;
@@ -1432,7 +1499,7 @@ h1{
     background: grey !important;
   }
 }
-cfg.js 11113
+cfg.js 11282
 var cfgs = [
 [ "", "General configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/General-configuration" ],
 [ "wifi", "Wifi mode (0=off, 1=client, 2=AP, 3=client or AP, 4=client-noscan)" ],
@@ -1486,13 +1553,14 @@ var cfgs = [
 [ "tcp.chase", "APRS location reporting (0=off, 1=fixed, 2=chase/GPS, 3=auto)"],
 [ "tcp.comment", "APRS location comment"],
 [ "", "MQTT data feed configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/MQTT-configuration"],
-[ "mqtt.active", "MQTT active (needs reboot)"],
+[ "mqtt.active", "MQTT message selection bitfield: 1=Sondes, 2=Uptime, 4=PMU, 8=GPS, 16=Scanner/Spectrum Peak, 128=Debug. 0 to disable MQTT (needs reboot)"],
 [ "mqtt.id", "MQTT client ID"],
 [ "mqtt.host", "MQTT server hostname"],
 [ "mqtt.port", "MQTT port"],
 [ "mqtt.username", "MQTT username"],
 [ "mqtt.password", "MQTT password"],
 [ "mqtt.prefix", "MQTT prefix"],
+[ "mqtt.report_interval", "MQTT reporting interval (ms)"],
 [ "", "Chasemapper settings", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/Chasemapper-configuration"],
 [ "cm.active", "Chasemapper active (0=disabled, 1=active)"],
 [ "cm.host", "Chasemapper UDP host"],
