@@ -256,8 +256,9 @@ tweaks, auto-scan and OTA follow-ups, Wi-Fi reconnect refinements, auth follow-u
 
 ### 9A4AM changes 
 
--Added a telemetry upload limit; if the radiosonde is below 1500m, it will not upload telemetry to the APRS and/or SondeHub servers.
--To upload without limits, set the Send_telemetry_limit variable to 0.
--Added code for a static IP and port for web access (disabled by default, uncomment the code if needed static IP and custom port).
--Added Meteosonde server button at index.html.
+- Added a telemetry upload limit; if the radiosonde is below 1500m, it will not upload telemetry to the APRS and/or SondeHub servers.   
+- To upload without limits, set the Send_telemetry_limit variable to 0.  
+- Added code for a static IP and port for web access (disabled by default, uncomment the code if needed static IP and custom port).  
+- Added Meteosonde server button at index.html.
+  
 
