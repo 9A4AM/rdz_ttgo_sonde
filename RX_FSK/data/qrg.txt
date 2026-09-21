@@ -4,17 +4,24 @@
 # (older versions: M=M10, 2=M20, now both treaded the same: automated M10/M20 decoding)
 # +: active, -: not active
 #
-402.300 4 + Greifswald
-402.500 4 - Schleswig
-402.700 4 + HH-Sasel
-403.000 4 - DeBilt
-404.100 4 + Norderney
-404.300 4 - Schleswig_2
-404.500 4 - Meppen
-404.700 4 - Greifswald_2
-405.100 4 - Lindenberg
-405.700 4 + Bergen
-405.900 4 + Bergen_2
-405.100 4 + Meppen_2
-405.300 4 - Essen
+405.300 4 + Zagreb 
+401.000 4 + Zadar 
+404.000 4 + Udine 
+402.800 M + Beograd 
+403.500 4 + Vienna 
+403.000 M + Ljubljana 
+402.300 4 + Munchen/Szeged 
+402.500 4 + Altenstadt 
+402.700 4 + Kummersbruck 
+404.700 4 + Graz 
+403.200 4 + Vienna_2 
+403.700 4 + Budapest 
+403.800 4 + Graz_2 
+402.000 4 + Zagreb_2 
+403.000 4 + Zadar_2 
+401.600 4 + Udine_2 
+404.600 M + Ljubljana2 
+400.000 4 - 
+400.000 4 - 
+400.000 4 -
 # end
