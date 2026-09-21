@@ -260,5 +260,6 @@ tweaks, auto-scan and OTA follow-ups, Wi-Fi reconnect refinements, auth follow-u
 - To upload without limits, set the Send_telemetry_limit variable to 0.  
 - Added code for a static IP and port for web access (disabled by default, uncomment the code if needed static IP and custom port).  
 - Added Meteosonde server button at index.html.
+- Added MQTT server button at index.html
   
 
