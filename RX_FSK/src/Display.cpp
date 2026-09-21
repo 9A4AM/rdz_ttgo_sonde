@@ -350,7 +350,7 @@ void U8x8Display::welcome() {
 	drawString(8 - strlen(version_id) / 2, 2, version_id);
 	setFont(FONT_SMALL);
 	drawString(0, 4, "RS41/92,DFM,Mx0");
-	drawString(0, 6, "by Hansi, DL9RDZ");
+	drawString(0, 6, "by Mario, 9A4AM");
 }
 
 static String previp;
@@ -766,7 +766,7 @@ void ILI9225Display::welcome() {
 		l+=22;
 	}
 	drawString(0, l, version_id);
-	drawString(0, l+2*22, "by Hansi, DL9RDZ");
+	drawString(0, l+2*22, "by Mario, 9A4AM");
 }
 
 void ILI9225Display::drawIP(uint16_t x, uint16_t y, int16_t width, uint16_t fg, uint16_t bg) {
