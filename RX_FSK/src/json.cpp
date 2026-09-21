@@ -11,12 +11,12 @@ const char *getType(SondeInfo *si) {
     if( si->type == STYPE_RS41 ) {
         if ( RS41::getSubtype(typestr, 11, si) == 0 ) return typestr;
     } else if ( TYPE_IS_DFM(si->type) && si->d.subtype > 0 ) {
-        const char *t = dfmSubtypeLong[si->d.subtype & 0xf];
-	if( (si->d.subtype & 0xf) == DFM_UNK) {
+        int sub = si->d.subtype & 0xf;
+	if( sub == DFM_UNK || sub > DFM_17P) {  // dfmSubtypeLong has entries 0..DFM_17P only
            sprintf(typestr, "DFMx%X", si->d.subtype>>4);
            return typestr;
 	}
-        return t;
+        return dfmSubtypeLong[sub];
     }
     return sondeTypeStrSH[sonde.realType(si)];
 }

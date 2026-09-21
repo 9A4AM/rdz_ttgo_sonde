@@ -315,6 +315,7 @@ void U8x8Display::drawString(uint16_t x, uint16_t y, const char *s, int16_t widt
 	char buf[50];
 	utf2latin15(s, buf, 50);
 	if(width!=WIDTH_AUTO && width>0) {
+		if(width > 49) width = 49;	// clamp to buf[50] (leave room for NUL)
 		for(int l = strlen(buf); l<width; l++) {
 			buf[l] = ' ';
 		}
@@ -322,7 +323,10 @@ void U8x8Display::drawString(uint16_t x, uint16_t y, const char *s, int16_t widt
 	}
 	if(width<0) {
 		int l = strlen(buf);
-		memset(buf, ' ', -width-l);
+		int pad = -width - l;		// leading spaces for right-justify
+		if(pad < 0) pad = 0;		// text already wider than field
+		if(pad > 49) pad = 49;		// clamp to buf[50]
+		memset(buf, ' ', pad);
 		utf2latin15(s, buf+l, 50-l);
 	}
 	u8x8->drawString(x, y, buf);
@@ -800,7 +804,7 @@ void ILI9225Display::drawQS(uint16_t x, uint16_t y, uint8_t len, uint8_t size, u
 ///////////////
 
 
-char Display::buf[17];
+char Display::buf[80];
 char Display::lineBuf[Display::LINEBUFLEN];
 
 RawDisplay *Display::rdis = NULL;
@@ -850,7 +854,15 @@ void Display::replaceLayouts(DispInfo *newlayouts, int nnew) {
 	// and release memory not used any more
 	if(old==staticLayouts) return;
 	for(int i=0; i<MAXSCREENS; i++) {
-		if(old[i].de) free(old[i].de);
+		if(old[i].de) {
+			// free the per-entry extra allocations (strdup/malloc'd StatInfo/
+			// CircleInfo) before freeing the DispEntry block itself.
+			for(DispEntry *de = old[i].de; de->func != NULL; de++) {
+				if(de->extra) free((void *)de->extra);
+			}
+			free(old[i].de);
+		}
+		if(old[i].label) free((void *)old[i].label);
 	}
 	free(old);
 }
@@ -917,6 +929,7 @@ void Display::parseDispElement(char *text, DispEntry *de)
 		case 'q':
 			{
 				struct StatInfo *statinfo = (struct StatInfo *)malloc(sizeof(struct StatInfo));
+				if(!statinfo) break;  // out of memory: leave func NULL so this entry is skipped
 				// maybe enable more flexible configuration?
 				statinfo->size=3;
 				statinfo->len=18;
@@ -962,18 +975,27 @@ void Display::parseDispElement(char *text, DispEntry *de)
 			if(text[1]=='0') {  
 				// extended configuration for arrow...
 				struct CircleInfo *circinfo = (struct CircleInfo *)malloc(sizeof(struct CircleInfo));
+				if(!circinfo) { de->func = NULL; break; }  // out of memory: skip this entry, drawGPS would deref extra
+				if(strlen(text) < 5) {
+					// malformed 'g0' config: too short for top/arr/bul; use safe defaults
+					circinfo->type='0'; circinfo->top='N'; circinfo->arr='C'; circinfo->bul='S';
+					circinfo->radius=50; circinfo->fgcol=0xfe80; circinfo->bgcol=0x0033;
+					circinfo->awidth=0; circinfo->acol=0xffff; circinfo->brad=0; circinfo->bcol=0xffff;
+					de->extra = (char *)circinfo;
+					break;
+				}
 #if 1
 				circinfo->type = '0';
 				circinfo->top = text[2];
 				circinfo->arr = text[3];
 				circinfo->bul = text[4];
 				char *ptr=text+5;
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				// next: radius
 				circinfo->radius = atoi(ptr);
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->fgcol = encodeColor(ptr);
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->bgcol = encodeColor(ptr);
 #else
 				circinfo->type = '0';
@@ -984,13 +1006,13 @@ void Display::parseDispElement(char *text, DispEntry *de)
 				circinfo->fgcol = 0xfe80;
 				circinfo->bgcol = 0x0033;
 #endif
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->awidth = atoi(ptr);
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->acol = encodeColor(ptr);
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->brad = atoi(ptr);
-				while(*ptr && *ptr!=',') ptr++; ptr++;
+				while(*ptr && *ptr!=',') ptr++; if(*ptr) ptr++;
 				circinfo->bcol = encodeColor(ptr);
 				de->extra = (char *)circinfo;
 			} else {
@@ -1010,6 +1032,19 @@ void Display::parseDispElement(char *text, DispEntry *de)
 		default:
 			LOG_W(TAG, "parseDispElement: unknown: %c\n", type);
 			break;
+	}
+	// Defensive: a strdup/malloc above may have failed (NULL) under heap
+	// pressure. drawHS/drawVS/drawFreq tolerate a NULL extra, and the
+	// no-extra elements (lat/lon/alt/type/afc/rssi) never read it; every
+	// other draw function dereferences extra, so neutralise the entry to
+	// avoid a NULL dereference at render time.
+	if(de->extra == NULL && de->func &&
+	   de->func != disp.drawHS  && de->func != disp.drawVS  &&
+	   de->func != disp.drawFreq && de->func != disp.drawLat &&
+	   de->func != disp.drawLon && de->func != disp.drawAlt &&
+	   de->func != disp.drawType && de->func != disp.drawAFC &&
+	   de->func != disp.drawRSSI) {
+		de->func = NULL;
 	}
 }
 
@@ -1122,6 +1157,12 @@ void Display::initFromFile(int index) {
 						LOG_I(TAG, "initFromFile: Illegal start of screen: %s\n", s);
 						continue;
 					}
+					// newlayouts only holds MAXSCREENS DispInfo entries; ignore
+					// any extra '@' screens to avoid writing past the buffer.
+					if(idx+1 >= MAXSCREENS) {
+						LOG_E(TAG, "initFromFile: too many screens (max %d), ignoring rest\n", MAXSCREENS);
+						continue;
+					}
 					char *label = strdup(s+1);
 					entrysize = countEntries(d);
 					LOG_D(TAG, "Reading entry with %d elements\n", entrysize);
@@ -1129,6 +1170,8 @@ void Display::initFromFile(int index) {
 					int res = allocDispInfo(entrysize, &newlayouts[idx], label);
 					if(res<0) {
 						LOG_E(TAG, "Error allocating memory for disp info");
+						free(label);  // allocDispInfo did not take ownership on failure
+						idx--;         // slot was not populated; reuse it
 						continue;
 					}
 					what = 0;
@@ -1182,6 +1225,13 @@ void Display::initFromFile(int index) {
 						colbg = (bg>>19) << 11 | ((bg>>10)&0x3F) << 5 | ((bg>>3)&0x1F);
 					}
 				} else if( (ptr=strchr(s, '=')) ) {  // one line with some data...
+					// countEntries only counts lines starting with a digit; a non-keyword
+					// '=' line not counted there would otherwise advance `what` past the
+					// de[] block (sized entrysize+1). Guard against that overflow.
+					if(what >= entrysize) {
+						LOG_E(TAG, "initFromFile: more entry lines than allocated (%d), ignoring\n", entrysize);
+						continue;
+					}
 					float x,y,w;
 					int n;
 					char text[61];
@@ -1309,7 +1359,7 @@ void Display::drawHS(DispEntry *de) {
 	if(!is_ms) hs = hs * 3.6;
 	boolean has_extra = (de->extra && de->extra[1]!=0)? true: false;
 	snprintf(buf, 16, hs>99?" %3.0f":" %2.1f", hs);
-	if(has_extra) { strcat(buf, de->extra+1); }
+	if(has_extra) { strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1); }
 	drawString(de,buf+strlen(buf)-4- (has_extra?strlen(de->extra+1):0) );
 	if(!has_extra) rdis->drawTile(de->x+4,de->y,2,is_ms?ms_tiles:kmh_tiles);
 }
@@ -1321,7 +1371,7 @@ void Display::drawVS(DispEntry *de) {
 	}
 	snprintf(buf, 16, "  %+2.1f", sonde.si()->d.vs);
 	LOG_D(TAG, "drawVS: extra is %s width=%d\n", de->extra?de->extra:"<null>", de->width);
-	if(de->extra) { strcat(buf, de->extra); }
+	if(de->extra) { strncat(buf, de->extra, sizeof(buf)-strlen(buf)-1); }
 	drawString(de, buf+strlen(buf)-5- (de->extra?strlen(de->extra):0) );
 	if(!de->extra) rdis->drawTile(de->x+5,de->y,2,ms_tiles);
 }
@@ -1430,7 +1480,7 @@ void Display::drawSite(DispEntry *de) {
 			//drawString(de, sonde.si()->launchsite);
 			//return;
 	}
-	if(de->extra[0]) strcat(buf, de->extra+1);
+	if(de->extra[0]) strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1);
 	drawString(de, buf);
 }
 void Display::drawTelemetry(DispEntry *de) {
@@ -1442,7 +1492,7 @@ void Display::drawTelemetry(DispEntry *de) {
 			value = sonde.si()->d.temperature;
 			if(!isnan(value)) {
 				sprintf(buf, "%5.1f", value);
-				strcat(buf, de->extra+1);
+				strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1);
 			}
 			buf[5+strlen(de->extra+1)] = 0;
 			break;
@@ -1451,7 +1501,7 @@ void Display::drawTelemetry(DispEntry *de) {
 			if(!isnan(value)) {
 				if(value>=1000) sprintf(buf, "%6.1f", value);
 				else sprintf(buf, "%6.2f", value);
-				strcat(buf, de->extra+1);
+				strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1);
 			}
 			buf[6+strlen(de->extra+1)] = 0;
 			break;
@@ -1459,7 +1509,7 @@ void Display::drawTelemetry(DispEntry *de) {
 			value = sonde.si()->d.relativeHumidity;
 			if(!isnan(value)) {
 				sprintf(buf, "%4.1f", value);
-				strcat(buf, de->extra+1);
+				strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1);
 			}
 			buf[4+strlen(de->extra+1)] = 0;
 			break;
@@ -1467,7 +1517,7 @@ void Display::drawTelemetry(DispEntry *de) {
 			value = sonde.si()->d.batteryVoltage;
 			if(!isnan(value)) {
 				snprintf(buf, 5, "%4.2f", value);
-				strcat(buf, de->extra+1);
+				strncat(buf, de->extra+1, sizeof(buf)-strlen(buf)-1);
 			}
 			buf[5+strlen(de->extra+1)] = 0;
 			break;
@@ -1502,7 +1552,7 @@ void Display::drawKilltimer(DispEntry *de) {
 			break;
 	}
 	if(de->extra[1])
-		strcat(buf, de->extra+2);
+		strncat(buf, de->extra+2, sizeof(buf)-strlen(buf)-1);
 	drawString(de, buf);
 }
 #define EARTH_RADIUS (6371000.0F)
@@ -1665,6 +1715,7 @@ void Display::drawGPS(DispEntry *de) {
 				if(border<7) border=7; // space for "N" label
 				int size = 1 + 2*circinfo->radius + 2*border;
 				uint16_t *bitmap = (uint16_t *)malloc(sizeof(uint16_t) * size * size);
+				if(!bitmap) break;  // out of memory: skip drawing the GPS circle
 				LOG_D(TAG, "Drawing circle with size %d at %d,%d\n",size,de->x, de->y);
 				for(int i=0; i<size*size; i++) { bitmap[i] = 0; }
 				// draw circle

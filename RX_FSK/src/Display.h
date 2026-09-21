@@ -166,7 +166,7 @@ public:
 
 	Display();
 	void init();
-	static char buf[17];
+	static char buf[80];	// holds a ~16-char field plus a layout-supplied suffix (de->extra)
 	static void drawLat(DispEntry *de);
 	static void drawLon(DispEntry *de);
 	static void drawAlt(DispEntry *de);

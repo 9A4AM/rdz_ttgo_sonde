@@ -50,7 +50,7 @@ void ShFreqImport::usekeyvalue() {
     if(strcmp(keyword,"lon")==0) lon = atof(value);
     if(strcmp(keyword,"frequency")==0) { if(isnan(freq)) freq = atof(value); } // prefer tx_frequency if available
     if(strcmp(keyword,"tx_frequency")==0) freq = atof(value);
-    if(strcmp(keyword,"type")==0) strcpy(type, value);
+    if(strcmp(keyword,"type")==0) { strncpy(type, value, sizeof(type)-1); type[sizeof(type)-1]=0; }
 }
 
 /* populate qrg.txt with frequency of near sonde */
@@ -233,7 +233,7 @@ int ShFreqImport::shImportSendRequest(int client, float lat, float lon, int dist
             "Accept: application/json\r\n"
             "Cache-Control: no-cache\r\n\r\n",
             lat, lon, dist*1000, time*60, sonde.config.sondehub.host);
-    int res = dprintf(client, req);
+    int res = dprintf(client, "%s", req);
     Serial.printf("dprintf res: %d (%d)\n", res, errno);
     Serial.print(req);
     importState = START;

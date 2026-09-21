@@ -645,7 +645,7 @@ Defined in `wifi_ops.FILE_SETS`:
 | Area | Limitation / TODO |
 |------|-------------------|
 | Partition table | Partition table is read from `.bin` images (`partition_table.py`) to find filesystem offset/size. Reading from a live device is not implemented. |
-| IMPROV | "Setup via IMPROV" button is on the **Serial** tab (left of "Save to file"); opens IMPROV dialog (device info, WiFi scan, connect). CLI `improv` subcommand is not implemented. |
+| IMPROV | "Setup via IMPROV" button is on the **Serial** tab (left of "Save to file"); opens IMPROV dialog (device info, WiFi scan, connect). The CLI has the same via `improv info | wifiscan | connect [--port] [--baud]`. |
 | `extractfs` CLI | No `--keep-image` flag (not needed since no temp file is created). |
 | Backup read baud | `read_backup` defaults to `921600` baud (via `DEFAULT_BAUD_READ`). Override with `--baud` on CLI or the esptool read baud rate setting in the GUI. "Use --no-stub" for read is checked by default. |
 | Wi-Fi device list | `wifi_ops.list_files()` calls GET `files.json?dir=.int`; if empty or error, shows static list and status message "Listing not supported by device firmware; showing default file names." |

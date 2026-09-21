@@ -142,6 +142,7 @@ typedef struct st_sondeinfo {
 	// statistics
 	uint8_t rxStat[20];
 	uint32_t rxStart;    		// millis() timestamp of continuous rx start
+	uint32_t rxtime;    		// wall-clock (time()) seconds when this frame was received; for upload cache replay
 	uint32_t norxStart;		// millis() timestamp of continuous no rx start
 	uint32_t viewStart;		// millis() timestamp of viewinf this sonde with current display
 	int8_t lastState;		// -1: disabled; 0: norx; 1: rx
@@ -240,7 +241,16 @@ struct st_ss {
  	char host[64];
  	int port;
  };
- 
+
+struct st_notify {
+	int  active;        // alert bitfield: 0=off, 1=landing near me, 2=new sonde, 3=both
+	int  dist;          // horizontal distance threshold, km (landing alert)
+	int  alt;           // altitude threshold, km (landing alert only below this)
+	char server[96];    // ntfy server base URL, http only (e.g. http://ntfy.sh; no TLS in this fw)
+	char topic[48];     // ntfy topic (publish target = server + "/" + topic)
+	char token[64];     // optional bearer token ("" = none)
+};
+
 struct st_sondehub {
 	int active;
 	int chase;
@@ -264,11 +274,18 @@ struct st_sdcard {
 	int speed;	/* SPI speed in Hz (0 = library default), e.g. 4000000, 8000000, 16000000 */
 };
 
+struct st_serialout {
+	int format;   // 0=off, 1=NMEA, 2=JSON, 3=CSV, 4=PAYLOAD_SUMMARY
+	int txd;      // TX pin (GPIO); -1 = disabled
+	int baud;     // baud rate, e.g. 9600
+};
+
 // to be extended
 enum { TYPE_TTGO, TYPE_M5_CORE2, TYPE_M5_CORE };
 
 typedef struct st_rdzconfig {
 	int type;			// autodetected type, TTGO or M5_CORE2
+	int cachesize;   // offline upload cache: number of frames to buffer (0 = disabled)
 	// hardware configuration
 	int button_pin;			// PIN port number menu button (+128 for touch mode)
 	int button2_pin;		// PIN port number menu button (+128 for touch mode)
@@ -303,16 +320,39 @@ typedef struct st_rdzconfig {
 	int dispsaver;			// Turn display on/off (0=always on, 10*n+1: off after n seconds, 
 					//	10*n+2: scanner off after n seconds, RX always shown)
 	int dispcontrast;		// For OLED: set contrast to 0..255 (-1: don't set/leave at factory default)
-	int startfreq;			// spectrum display start freq (400, 401, ...)
+	double startfreq;		// spectrum/scan start freq in MHz (decimals allowed, e.g. 400.2); sweep covers startfreq..startfreq+~6 MHz
 	int channelbw;			// spectrum channel bandwidth (valid: 5, 10, 20, 25, 50, 100 kHz)	
 	int spectrum;			// show freq spectrum for n seconds -1=disable; 0=forever
 	int marker;				// show freq marker in spectrum  0=disable
 	int maxsonde;			// number of max sonde in scan (range=1-99)
 	int norx_timeout;		// Time after which rx mode switches to scan mode (without rx signal)
 	int noisefloor;			// for spectrum display
+	int scanplotint;		// web scan-plot idle-sweep interval in seconds (0=disable)
+	// Spectrum-sweep per-bin RSSI dwell overrides (affect both the spectrum view
+	// and auto-scan; -1 = use the per-display default). Longer dwell = steadier
+	// RSSI / better weak-peak detection, slower sweep. Plot geometry is unaffected.
+	int scan_smooth;        // SX1278 RSSI averaging exponent 0..7 (samples = 2^(n+1)); -1 = default
+	int scan_addwait;       // extra per-bin settle time in microseconds; -1 = default
+	int scan_iter;          // number of full sweeps per scan (max RSSI kept); 1..20, default 6
+	// Auto-scan (peak detection) settings. When autoscan_enable is set, the
+	// firmware ignores the configured channel list and instead sweeps the
+	// spectrum, finds peaks above the noise floor and trial-decodes each one,
+	// like radiosonde_auto_rx. Names/defaults mirror auto_rx's scanner.
+	int autoscan_enable;    // 1 = use peak-detection auto-scan instead of the channel list
+	int autoscan_snr;       // min SNR (dB) above the (median) noise floor for a peak
+	int autoscan_mindist;   // min distance between detected peaks (Hz)
+	int autoscan_quant;     // quantize detected peaks to this step (Hz; sondes use 10 kHz)
+	int autoscan_maxpeaks;  // max peaks to trial-decode per sweep
+	int autoscan_dwell;     // per-peak detection budget (s); per-type = this/N_types unless typedwell set
+	int autoscan_typedwell; // fixed decode time per sonde type (ms); 0 = derive from autoscan_dwell
+	int autoscan_qrgfirst;  // 1 = each cycle try the active channel-list QRGs (configured freq+type) before the spectrum peaks
+	char autoscan_exclude[64]; // comma-separated MHz of known noise/birdies to ignore in peak detection (e.g. "400.01,400.11")
+	int allowfileupload;		// allow firmware/filesystem upload from the update page (0=disable). Hidden: not in cfg.js
 	char mdnsname[15];		// mDNS-Name, defaults to rdzsonde
 	// receiver configuration
 	int freqofs;			// frequency offset (tuner config = rx frequency + freqofs) in Hz
+	int lnaboost;			// LnaBoostHf (RegLna 0x0C bits 1-0): 0=default LNA current, 1=boost on (150%)
+	int lnagain;			// external LNA gain in dB (>=0), subtracted from reported RSSI (0 = no correction)
 	struct st_rs41config rs41;	// configuration options specific for RS41 receiver
 	struct st_rs92config rs92;
 	struct st_dfmconfig dfm;
@@ -335,6 +375,8 @@ typedef struct st_rdzconfig {
 	struct st_cm cm;
 	struct st_sdcard sd;
 	struct st_ss ss;
+	struct st_notify notify;
+	struct st_serialout serialout;	// local serial position output (Serial1)
 } RDZConfig;
 
 
@@ -388,6 +430,11 @@ public:
 	/* new interface */
 	void setup();
 	void receive();
+	// Tune+decode one frame for the current sondeList[rxtask.currentSonde] entry,
+	// returning the raw decoder result (RX_OK/RX_ERROR/RX_TIMEOUT). Used by the
+	// auto-scan trial-decode loop; unlike receive() it has no event/timeout/display
+	// side effects.
+	uint16_t rxRawFrame();
 	uint16_t waitRXcomplete();
 
 	SondeInfo *si();

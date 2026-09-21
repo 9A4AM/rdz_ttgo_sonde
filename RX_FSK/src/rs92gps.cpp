@@ -533,7 +533,11 @@ int calc_satpos_rnx2(EPHEM_t *eph, double t, SAT_t *satp) {
 
         // Woche hat 604800 sec
         tdiff = WEEKSEC;
-        while (eph[count].prn > 0) {
+        // read_RNXpephs fills eph[] PRN-indexed (sparse): eph[k].prn==k for
+        // present PRNs and 0 for gaps. Scan all slots up to the sentinel
+        // (eph[33].prn==0) instead of stopping at the first gap, which would
+        // otherwise skip every PRN past the first missing one.
+        while (count < 33) {
             if (eph[count].prn == j) {
 
                 satfound += 1;

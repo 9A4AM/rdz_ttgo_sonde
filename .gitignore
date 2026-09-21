@@ -34,6 +34,9 @@
 .pio
 .vscode
 
+# OTA artifacts assembled by `make ota` (served by `make ota-serve`)
+ota-dist
+
 local-doc
 __pycache__
 .venv

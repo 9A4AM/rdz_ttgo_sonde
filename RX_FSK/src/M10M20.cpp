@@ -37,8 +37,20 @@ decoderSetupCfg m10m20SetupCfg = {
 	.preamble_cfg = 0x00 | 0x00 | 0x1F,
 };
 
-int M10M20::setup(float frequency, int /*type*/) 
+// Defined after the FEC repair buffers below; clears them on every (re)tune.
+static void m10m20ResetFEC();
+
+int M10M20::setup(float frequency, int /*type*/)
 {
+	// The oe5dxl-style error correction below keeps per-byte-position "stable value"
+	// history (fixbytes/fixcnt) for ONE sonde on ONE frequency. The buffers are
+	// file-static, so without this reset they carry across every frequency/sonde
+	// change -- e.g. across every auto-scan trial. With a consistent birdie/spur
+	// present, the repair loop can then "fix" the spur into a CRC-valid frame, i.e.
+	// a false lock that persists until the static state is cleared. Resetting on each
+	// tune gives every trial/channel a clean start; a held sonde still accumulates
+	// history across frames (setup() is not re-called per frame while decoding one sonde).
+	m10m20ResetFEC();
 	M10M20_DBG(Serial.println("Setup sx1278 for M10/M20 sonde"));;
 	if(sx1278.ON()!=0) {
 		M10M20_DBG(Serial.println("Setting SX1278 power on FAILED"));
@@ -231,6 +243,13 @@ static SET256 sondeudp_VARSETM20 = {0xF3E27F54UL,0x0000000FUL,0x00000030UL,
 
 static uint8_t fixcnt[M10_FRAMELEN];
 static uint8_t fixbytes[M10_FRAMELEN];
+
+// Clear the FEC repair history. Called from M10M20::setup() on every (re)tune so the
+// repair buffers never carry a previous frequency's/sonde's bytes into a new one.
+static void m10m20ResetFEC() {
+	memset(fixcnt, 0, sizeof(fixcnt));
+	memset(fixbytes, 0, sizeof(fixbytes));
+}
 
 static int32_t getint32(uint8_t *data) {
 	return (int32_t)( data[3]|(data[2]<<8)|(data[1]<<16)|(data[0]<<24) );
@@ -555,6 +574,7 @@ int M10M20::decodeframeM20(uint8_t *data) {
 
 	frl = data[0] + 1;     // frame len? (0x45+1 => 70)
 	if(frl>M20_FRAMELEN) { frl = M20_FRAMELEN; }
+	if(frl<2) { frl = 2; }	// crcpos = frl-2 must be >= 0 (a corrupt data[0]==0 gave data[-1])
 	do {
 		crcok = checkM10M20crc(frl-2, data);
 		if(crcok || repairstep == 0) break;

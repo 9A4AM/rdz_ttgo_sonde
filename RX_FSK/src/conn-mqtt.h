@@ -40,6 +40,8 @@ public:
         /* Called approx 1x / second* */
         void updateStation( PosInfo *pi );
 
+        bool replayReady();
+
         /* Called when frequency changes */
         void updateQRG( int nextIndex );
 

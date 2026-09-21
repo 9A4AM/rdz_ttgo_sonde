@@ -64,6 +64,11 @@ public:
 	//int receiveFrame();
 
 	static int getSubtype(char *buf, int buflen, SondeInfo *si);
+	// Additional calibration-subframe data for SondeHub upload.
+	// Each returns 0 if the required subframe block has been received, -1 otherwise.
+	static int getTxFrequencyMHz(float *freq, SondeInfo *si);
+	static int getMainboard(char *buf, int buflen, SondeInfo *si);
+	static int getMainboardFW(uint32_t *fw, SondeInfo *si);
 
 	int use_ecc = 1;
 };

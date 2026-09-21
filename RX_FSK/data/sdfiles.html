@@ -2,23 +2,32 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="color-scheme" content="light dark">
+    <script src="theme.js?v=%VERSION_ID%"></script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>rdzTTGOsonde SD card file browser</title>
+    <link rel="stylesheet" type="text/css" href="style.css?v=%VERSION_ID%">
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f4f4f4; }
-        h1 { color: #333; }
+        /* style.css is linked only for the theme tokens; neutralise its legacy
+           table styling so this page keeps its own flat look. */
+        table, th, td { background: transparent; border: 0; }
+        body { font-family: Arial, sans-serif; margin: 20px auto; max-width: 1000px;
+               height: auto; background: var(--bg); color: var(--text); }
+        h1 { color: var(--text); }
         table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background: #4CAF50; color: #fff; }
-        tr:hover { background: #f1f1f1; }
-        #viewModal { display: none; position: fixed; z-index: 10; inset: 0; background: rgba(0,0,0,0.5); overflow: auto; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border-soft); }
+        th { background: var(--brand); color: var(--on-brand); }
+        tr:hover { background: var(--bg-alt); }
+        #viewModal { display: none; position: fixed; z-index: 10; inset: 0; background: var(--overlay); overflow: auto; }
         #viewModal.show { display: flex; align-items: center; justify-content: center; }
-        .modalContent { background: #fff; padding: 16px; max-width: 95%; max-height: 90vh; overflow: auto; border-radius: 8px; }
+        .modalContent { background: var(--surface); color: var(--text); padding: 16px; max-width: 95%;
+                        max-height: 90vh; overflow: auto; border-radius: 8px; }
         .modalContent h2 { margin-top: 0; }
         .modalContent table { font-size: 0.9em; }
-        .modalContent th, .modalContent td { padding: 4px 8px; border: 1px solid #ddd; }
-        .modalContent th { background: #4CAF50; color: #fff; }
+        .modalContent th, .modalContent td { padding: 4px 8px; border: 1px solid var(--border-soft); }
+        .modalContent th { background: var(--brand); color: var(--on-brand); }
     </style>
+    <script src="dialog.js"></script>
 </head>
 <body>
     <div id="viewModal">
@@ -96,11 +105,12 @@
             deleteBtn.title = 'Delete';
             deleteBtn.style.cursor = 'pointer';
             deleteBtn.onclick = () => {
-                if (confirm(`Confirm to delete "${file.name}"?`)) {
+                showConfirm(`Confirm to delete "${file.name}"?`).then(ok => {
+                    if (!ok) return;
                     fetch(`sdrm.html?file=${pdir}${encodeURIComponent(file.name)}`)
-                        .then(resp => resp.ok ? (alert('Deleted.'), row.remove()) : alert('Delete failed.'))
-                        .catch(() => alert('Error sending request.'));
-                }
+                        .then(resp => resp.ok ? (showAlert('Deleted.'), row.remove()) : showAlert('Delete failed.'))
+                        .catch(() => showAlert('Error sending request.'));
+                });
             };
             deleteCell.appendChild(deleteBtn);
 

@@ -80,7 +80,15 @@ static int _rs_body_lines = NLINES;
 static int _rs_status_line_end = 0;
 static int _content_length = -1;
 static int _body_bytes_seen = 0;
+static int _rs_status_code = -1;    // numeric HTTP status of the current response (e.g. 200, 502)
 
+// Telemetry-batch delivery tracking for at-least-once uploads. When a /sondes/telemetry
+// batch is opened we remember the replay cursor of its first frame. If the batch is not
+// acked with a 2xx (e.g. a proxy 502 during a backend outage) or the connection drops
+// before the ACK, we rewind the cursor to re-send the batch instead of losing it.
+// SondeHub dedups by serial+datetime, so re-sending an already-received batch is harmless.
+static bool sh_batch_pending = false;      // a telemetry batch is in flight (APPENDING/WAITACK)
+static uint32_t sh_batch_start_seq = 0;    // replay cursor of the batch's first frame
 
 /* Process one chunk. Returns 1 if status line started with "HTTP/1" (caller sets IDLE), 0 otherwise. */
 static int _sh_process_response_chunk(const char *buf, int len) {
@@ -97,6 +105,7 @@ static int _sh_process_response_chunk(const char *buf, int len) {
             _content_length = -1;
             _rs_status_line_end = 0;
             _body_bytes_seen = 0;
+            _rs_status_code = -1;
             _rs_current_target->buf[0] = '\0';
         }
         char *cur_buf = _rs_current_target->buf;
@@ -105,8 +114,12 @@ static int _sh_process_response_chunk(const char *buf, int len) {
         char c = buf[i];
         if (_rs_state == _RS_STATUS_LINE) {
             if (c == '\n') {
+                cur_buf[*cur_len] = '\0';   // terminate for strchr/atoi below
                 if (strncmp(cur_buf, "HTTP/1", 6) == 0) {
                     ret = 1;
+                    // parse numeric status code, e.g. "HTTP/1.1 200 OK" -> 200
+                    const char *sp = strchr(cur_buf, ' ');
+                    _rs_status_code = sp ? atoi(sp + 1) : 0;
                     _rs_state = _RS_SKIP_HEADERS;
                     _rs_status_line_end = *cur_len;
                 } else
@@ -203,6 +216,16 @@ void ConnSondehub::updateSonde( SondeInfo *si ) {
     }
 }
 
+bool ConnSondehub::replayReady() {
+    return sonde.config.sondehub.active &&
+           (shclient_state == SH_CONN_IDLE || shclient_state == SH_CONN_APPENDING);
+}
+
+void ConnSondehub::idleTick() {
+    // No frame delivered this tick: run the FSM / finalize the pending HTTP request.
+    updateSonde(NULL);
+}
+
 
 // no logging in dns callback. this may crash if debug logging over network is enabled....
 static void _sh_dns_found(const char * name, const ip_addr_t *ipaddr, void * /*arg*/) {
@@ -224,6 +247,10 @@ static void _sh_dns_found(const char * name, const ip_addr_t *ipaddr, void * /*a
 
 #define TO_WAITACK 15000
 #define TO_WAITIMPORT 30000
+// Timeout for the connection-establishment states (DNS lookup, TCP connect).
+// Without this, a lost lwIP DNS callback or a stalled non-blocking connect()
+// would leave the FSM stuck forever (only a hardware restart would recover it).
+#define TO_CONNECT 15000
 
 static void _sh_wait_cktimeout() {
     // This is also called when IDLE state checks for data, in this case data is arriving
@@ -235,6 +262,7 @@ static void _sh_wait_cktimeout() {
     if(now - time_wait_start > (shclient_state==SH_CONN_WAITACK?TO_WAITACK:TO_WAITIMPORT)) {
         LOG_W(TAG, "timeout waiting for %s", shclient_state==SH_CONN_WAITACK?"ACK":"IMPORTRES");
         close(shclient);
+        shclient = -1;   // mark closed so netshutdown / later code can't double-close it
         shclient_state = SH_ERROR_RETRY;
         time_wait_start = 0;
         shStart = 0;
@@ -262,6 +290,7 @@ void ConnSondehub::sondehub_client_fsm() {
             {
                 // We are disconnected. Try to connect, starting with a DNS lookup
                 shclient_state = SH_DNSLOOKUP;  // Set state already here to avoid potential race with callback
+                time_wait_start = millis();     // start watchdog for DNS lookup
                 err_t res = dns_gethostbyname_addrtype( sonde.config.sondehub.host, &shclient_ipaddr, _sh_dns_found, NULL, LWIP_DNS_ADDRTYPE_IPV4 );
                 if(res == ERR_OK) { // returns immediately if host is IP or in cache
                     shclient_state = SH_DNSRESOLVED;
@@ -278,7 +307,14 @@ void ConnSondehub::sondehub_client_fsm() {
         case SH_DNSLOOKUP:
             {
                 // DNS lookup still in progress. callback should switch to DNSRESOLVED or ERROR_RETRY, so just wait
-                // TODO: Maybe in case of stuck here, abort and retry?
+                // Watchdog: if the lwIP DNS callback never fires, don't get stuck here forever.
+                if (time_wait_start != 0 && millis() - time_wait_start > TO_CONNECT) {
+                    LOG_W(TAG, "timeout waiting for DNS response\n");
+                    shclient_state = SH_ERROR_RETRY;
+                    time_wait_start = 0;
+                    shStart = 0;
+                    break;
+                }
                 LOG_I(TAG, "SH_FSM: Waiting for DNS response\n");
                 break;
             }
@@ -300,6 +336,7 @@ void ConnSondehub::sondehub_client_fsm() {
                 if(res) {
                     if (errno == EINPROGRESS) { // Should be the usual case, go to connecting state
                         shclient_state = SH_CONNECTING;
+                        time_wait_start = millis();  // start watchdog for TCP connect
                     } else {
                         close(shclient);
                         shclient = -1;
@@ -329,6 +366,11 @@ void ConnSondehub::sondehub_client_fsm() {
                     LOG_E(TAG, "SH_CONNECTING: select error\n");
                     goto error;
                 } else if (res==0) { // still pending
+                    // Watchdog: don't wait forever if connect() never completes
+                    if (time_wait_start != 0 && millis() - time_wait_start > TO_CONNECT) {
+                        LOG_W(TAG, "timeout waiting for TCP connect\n");
+                        goto error;
+                    }
                     break;
                 }
                 // Socket has become ready (or something went wrong, check for error first)
@@ -372,13 +414,13 @@ void ConnSondehub::sondehub_client_fsm() {
                 //   noise tolerant - should not be needed:
                 //   if the data contains HTTP/1 copy that to the start of the buffer, ignore anything up to that point
                 //   if not find the last \0 and append next response after the part afterwards
-                fd_set fdset, fdeset;
-                FD_ZERO(&fdset);
-                FD_SET(shclient, &fdset);
-                FD_ZERO(&fdeset);
-                FD_SET(shclient, &fdeset);
+                fd_set fdset;
                 struct timeval selto = {0};
                 for(int k=0; k<10; k++) { // read more data...
+                    // select() modifies fdset in place (clears non-ready fds),
+                    // so it must be re-initialised on every iteration.
+                    FD_ZERO(&fdset);
+                    FD_SET(shclient, &fdset);
                     int res = select(shclient+1, &fdset, NULL, NULL, &selto);
                     if(res<0) {
                         LOG_E(TAG, "SH_CONN_IDLE: select error\n");
@@ -397,13 +439,25 @@ void ConnSondehub::sondehub_client_fsm() {
                         shclient_state = SH_ERROR_RETRY;
                         time_wait_start = 0;
                         shStart = 0;
+                        // Connection dropped before the ACK: re-send the unconfirmed batch.
+                        if (sh_batch_pending) { replayCursor = sh_batch_start_seq; sh_batch_pending = false; }
                         break;
                     } else {
                         // Copy to status
                         int http1_ok = _sh_process_response_chunk(buf, res);
                         if (shclient_state == SH_CONN_WAITACK && http1_ok) {
-                            shclient_state = SH_CONN_IDLE;
-                            time_wait_start = 0;
+                            if (_rs_status_code >= 200 && _rs_status_code < 300) {
+                                // Genuine success: the server accepted the request.
+                                shclient_state = SH_CONN_IDLE;
+                                time_wait_start = 0;
+                                sh_batch_pending = false;   // batch committed; cursor stays advanced
+                            } else {
+                                // Non-2xx (e.g. a proxy 502/504 while the backend is down).
+                                // Not an ACK: treat it as a failure and rewind, so the batch
+                                // is re-sent once the link recovers instead of being dropped.
+                                LOG_W(TAG, "SH ACK status %d; treating as failure (will retry)\n", _rs_status_code);
+                                goto error;
+                            }
                         }
                         if( shclient_state == SH_CONN_WAITIMPORTRES ) {   // we are waiting for a reply to a sondehub frequency import request
                             int import_res = ShFreqImport::shImportHandleReply(buf, res);
@@ -436,7 +490,10 @@ error:
     close(shclient);
     shclient = -1;
     shclient_state = SH_ERROR_RETRY;
+    time_wait_start = 0;
     shStart = 0;
+    // Any error while a telemetry batch was in flight: rewind so it is re-sent.
+    if (sh_batch_pending) { replayCursor = sh_batch_start_seq; sh_batch_pending = false; }
 }
 
 
@@ -485,7 +542,9 @@ void ConnSondehub::updateStation( PosInfo *pi ) {
     w = data;
     // not necessary...  memset(w, 0, STATION_DATA_LEN);
 
-    sprintf(w,
+    // helper: remaining space in data[] from the current write cursor
+    #define SH_REMAIN (STATION_DATA_LEN - (int)(w - data))
+    snprintf(w, SH_REMAIN,
             "{"
             "\"software_name\": \"%s\","
             "\"software_version\": \"%s\","
@@ -495,25 +554,25 @@ void ConnSondehub::updateStation( PosInfo *pi ) {
 
     // Only send email if provided
     if (strlen(conf->email) != 0) {
-        sprintf(w, "\"uploader_contact_email\": \"%s\",", conf->email);
+        snprintf(w, SH_REMAIN, "\"uploader_contact_email\": \"%s\",", conf->email);
         w += strlen(w);
     }
 
     // Only send antenna if provided
     if (strlen(conf->antenna) != 0) {
-        sprintf(w, "\"uploader_antenna\": \"%s\",", conf->antenna);
+        snprintf(w, SH_REMAIN, "\"uploader_antenna\": \"%s\",", conf->antenna);
         w += strlen(w);
     }
 
     // We send GPS position: (a) in CHASE mode, (b) in AUTO mode if no fixed location has been specified in config
     if (chase == SH_LOC_CHASE) {
         if (gpsPos.valid) {
-            sprintf(w,
+            snprintf(w, SH_REMAIN,
                     "\"uploader_position\": [%.6f,%.6f,%d],"
                     "\"mobile\": true",
                     gpsPos.lat, gpsPos.lon, gpsPos.alt);
         } else {
-            sprintf(w, "\"uploader_position\": [null,null,null]");
+            snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         }
         w += strlen(w);
     }
@@ -521,20 +580,21 @@ void ConnSondehub::updateStation( PosInfo *pi ) {
     else if (chase == SH_LOC_FIXED) {
         if ((!isnan(sonde.config.rxlat)) && (!isnan(sonde.config.rxlon))) {
             if (isnan(sonde.config.rxalt))
-                sprintf(w, "\"uploader_position\": [%.6f,%.6f,null]", sonde.config.rxlat, sonde.config.rxlon);
+                snprintf(w, SH_REMAIN, "\"uploader_position\": [%.6f,%.6f,null]", sonde.config.rxlat, sonde.config.rxlon);
             else
-                sprintf(w, "\"uploader_position\": [%.6f,%.6f,%d]", sonde.config.rxlat, sonde.config.rxlon, (int)sonde.config.rxalt);
+                snprintf(w, SH_REMAIN, "\"uploader_position\": [%.6f,%.6f,%d]", sonde.config.rxlat, sonde.config.rxlon, (int)sonde.config.rxalt);
         } else {
-            sprintf(w, "\"uploader_position\": [null,null,null]");
+            snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         }
         w += strlen(w);
     } else {
-        sprintf(w, "\"uploader_position\": [null,null,null]");
+        snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         w += strlen(w);
     }
 
     // otherwise (in SH_LOC_NONE mode) we dont include any position info
-    sprintf(w, "}");
+    snprintf(w, SH_REMAIN, "}");
+    #undef SH_REMAIN
 
     dprintf( shclient, "PUT /listeners HTTP/1.1\r\n"
             "Host: %s\r\n"
@@ -653,10 +713,18 @@ void ConnSondehub::sondehub_send_data(SondeInfo * s) {
 
     gmtime_r(&t, &ts);
 
+    // time_received reflects when WE received the frame (its rxtime), not "now",
+    // so replayed frames report the correct receipt time.
+    struct tm rxinfo;
+    time_t rxt = (s->rxtime != 0) ? (time_t)s->rxtime : now;
+    gmtime_r(&rxt, &rxinfo);
+
     memset(rs_msg, 0, MSG_SIZE);
     w = rs_msg;
 
-    sprintf(w,
+    // helper: remaining space in rs_msg[] from the current write cursor
+    #define SH_REMAIN (MSG_SIZE - (int)(w - rs_msg))
+    snprintf(w, SH_REMAIN,
             " {"
             "\"software_name\": \"%s\","
             "\"software_version\": \"%s\","
@@ -668,7 +736,7 @@ void ConnSondehub::sondehub_send_data(SondeInfo * s) {
             "\"lat\": %.5f,"
             "\"lon\": %.5f,"
             "\"alt\": %.5f,"
-            "\"frequency\": %.3f,"
+            "\"frequency\": %.5f,"
             "\"vel_h\": %.5f,"
             "\"vel_v\": %.5f,"
             "\"heading\": %.5f,"
@@ -676,80 +744,94 @@ void ConnSondehub::sondehub_send_data(SondeInfo * s) {
             "\"frame\": %d,"
             "\"type\": \"%s\",",
             version_name, version_id, conf->callsign,
-            timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec,
+            rxinfo.tm_year + 1900, rxinfo.tm_mon + 1, rxinfo.tm_mday, rxinfo.tm_hour, rxinfo.tm_min, rxinfo.tm_sec,
             manufacturer_string[realtype], s->d.ser,
             ts.tm_year + 1900, ts.tm_mon + 1, ts.tm_mday, ts.tm_hour, ts.tm_min, ts.tm_sec,
-            (float)s->d.lat, (float)s->d.lon, (float)s->d.alt, (float)s->freq, (float)s->d.hs, (float)s->d.vs,
+            (float)s->d.lat, (float)s->d.lon, (float)s->d.alt, (float)(s->freq + s->afc / 1e6f), (float)s->d.hs, (float)s->d.vs,
             (float)s->d.dir, -((float)s->rssi / 2), s->d.vframe, sondeTypeStrSH[realtype]
                 );
     w += strlen(w);
 
     // Only send sats if not M20
     if (realtype != STYPE_M20) {
-        sprintf(w, "\"sats\": %d,", (int)s->d.sats);
+        snprintf(w, SH_REMAIN, "\"sats\": %d,", (int)s->d.sats);
         w += strlen(w);
     }
 
     /* if there is a subtype (DFM only) */
     if ( TYPE_IS_DFM(s->type) && s->d.subtype > 0 ) {
-        if ( (s->d.subtype & 0xF) != DFM_UNK) {
+        if ( (s->d.subtype & 0xF) != DFM_UNK && (s->d.subtype & 0xF) <= DFM_17P) {
             const char *t = dfmSubtypeLong[s->d.subtype & 0xF];
-            sprintf(w, "\"subtype\": \"%s\",", t);
+            snprintf(w, SH_REMAIN, "\"subtype\": \"%s\",", t);
         }
         else {
-            sprintf(w, "\"subtype\": \"DFMx%X\",", s->d.subtype >> 4); // Unknown subtype
+            snprintf(w, SH_REMAIN, "\"subtype\": \"DFMx%X\",", s->d.subtype >> 4); // Unknown subtype
         }
         w += strlen(w);
     } else if ( s->type == STYPE_RS41 ) {
         char buf[11];
         if (RS41::getSubtype(buf, 11, s) == 0) {
-            sprintf(w, "\"subtype\": \"%s\",", buf);
+            snprintf(w, SH_REMAIN, "\"subtype\": \"%s\",", buf);
+            w += strlen(w);
+        }
+        float txfreq;
+        if (RS41::getTxFrequencyMHz(&txfreq, s) == 0) {
+            snprintf(w, SH_REMAIN, "\"tx_frequency\": %.3f,", txfreq);
+            w += strlen(w);
+        }
+        if (RS41::getMainboard(buf, 11, s) == 0) {
+            snprintf(w, SH_REMAIN, "\"rs41_mainboard\": \"%s\",", buf);
+            w += strlen(w);
+        }
+        uint32_t fw;
+        if (RS41::getMainboardFW(&fw, s) == 0) {
+            snprintf(w, SH_REMAIN, "\"rs41_mainboard_fw\": \"%u\",", fw);
             w += strlen(w);
         }
     }
 
     // Only send temp if provided
     if (!isnan(s->d.temperature)) {
-        sprintf(w, "\"temp\": %.1f,", s->d.temperature);
+        snprintf(w, SH_REMAIN, "\"temp\": %.1f,", s->d.temperature);
         w += strlen(w);
     }
 
     // Only send humidity if provided
     if (!isnan(s->d.relativeHumidity)) {
-        sprintf(w, "\"humidity\": %.1f,", s->d.relativeHumidity);
+        snprintf(w, SH_REMAIN, "\"humidity\": %.1f,", s->d.relativeHumidity);
         w += strlen(w);
     }
 
     // Only send pressure if provided
     if (!isnan(s->d.pressure)) {
-        sprintf(w, "\"pressure\": %.2f,", s->d.pressure);
+        snprintf(w, SH_REMAIN, "\"pressure\": %.2f,", s->d.pressure);
         w += strlen(w);
     }
 
     // Only send burst timer if RS41 and fresh within the last 51s
     if ((realtype == STYPE_RS41) && (s->d.crefKT > 0) && (s->d.vframe - s->d.crefKT < 51)) {
-        sprintf(w, "\"burst_timer\": %d,", (int)s->d.countKT);
+        snprintf(w, SH_REMAIN, "\"burst_timer\": %d,", (int)s->d.countKT);
         w += strlen(w);
     }
 
     // Only send battery if provided
     if (s->d.batteryVoltage > 0) {
-        sprintf(w, "\"batt\": %.2f,", s->d.batteryVoltage);
+        snprintf(w, SH_REMAIN, "\"batt\": %.2f,", s->d.batteryVoltage);
         w += strlen(w);
     }
 
     // Only send antenna if provided
     if (strlen(conf->antenna) != 0) {
-        sprintf(w, "\"uploader_antenna\": \"%s\",", conf->antenna);
+        snprintf(w, SH_REMAIN, "\"uploader_antenna\": \"%s\",", conf->antenna);
         w += strlen(w);
     }
 
     // We send GPS position: (a) in CHASE mode, (b) in AUTO mode if no fixed location has been specified in config
     if (chase == SH_LOC_CHASE) {
         if (gpsPos.valid) {
-            sprintf(w, "\"uploader_position\": [%.6f,%.6f,%d]", gpsPos.lat, gpsPos.lon, gpsPos.alt);
+            snprintf(w, SH_REMAIN, "\"uploader_position\": [%.6f,%.6f,%d]", gpsPos.lat, gpsPos.lon, gpsPos.alt);
         } else {
-            sprintf(w, "\"uploader_position\": [null,null,null]");
+            snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         }
         w += strlen(w);
     }
@@ -757,26 +839,32 @@ void ConnSondehub::sondehub_send_data(SondeInfo * s) {
     else if (chase == SH_LOC_FIXED) {
         if ((!isnan(sonde.config.rxlat)) && (!isnan(sonde.config.rxlon))) {
             if (isnan(sonde.config.rxalt))
-                sprintf(w, "\"uploader_position\": [%.6f,%.6f,null]", sonde.config.rxlat, sonde.config.rxlon);
+                snprintf(w, SH_REMAIN, "\"uploader_position\": [%.6f,%.6f,null]", sonde.config.rxlat, sonde.config.rxlon);
             else
-                sprintf(w, "\"uploader_position\": [%.6f,%.6f,%d]", sonde.config.rxlat, sonde.config.rxlon, (int)sonde.config.rxalt);
+                snprintf(w, SH_REMAIN, "\"uploader_position\": [%.6f,%.6f,%d]", sonde.config.rxlat, sonde.config.rxlon, (int)sonde.config.rxalt);
         } else {
-            sprintf(w, "\"uploader_position\": [null,null,null]");
+            snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         }
         w += strlen(w);
     } else {
-        sprintf(w, "\"uploader_position\": [null,null,null]");
+        snprintf(w, SH_REMAIN, "\"uploader_position\": [null,null,null]");
         w += strlen(w);
     }
 
     // otherwise (in SH_LOC_NONE mode) we dont include any position info
-    sprintf(w, "}");
+    snprintf(w, SH_REMAIN, "}");
+    #undef SH_REMAIN
 
     if (shclient_state != SH_CONN_APPENDING) {
         sondehub_send_header(s, &timeinfo);
         sondehub_send_next(s, rs_msg, strlen(rs_msg), 1);
         shclient_state = SH_CONN_APPENDING;
         shStart = now;
+        // Remember where this batch starts. drainConnectors advances replayCursor
+        // only AFTER updateSonde() returns, so right now it still points at this
+        // (first) frame's seq — the point to rewind to if the batch is not acked.
+        sh_batch_start_seq = replayCursor;
+        sh_batch_pending = true;
     } else {
         sondehub_send_next(s, rs_msg, strlen(rs_msg), 0);
     }
@@ -861,6 +949,11 @@ String ConnSondehub::getStatus() {
         escapeJson(info+n, _rs_ack.buf, 1200-n);
         n = strlen(info);
         int k = snprintf(info+n, 1200-n, "<br>Import reply: ");
+        // snprintf returns the length it WOULD have written; clamp to the
+        // space actually left so info+n+k stays in bounds and the size below
+        // cannot go negative.
+        if(k < 0) k = 0;
+        if(k > 1200-n-1) k = 1200-n-1;
         if(strncmp(_rs_import.buf, "HTTP/1.1 200", 12)==0) {
             /* if ok only show beginning. if error show more */
             strcpy(_rs_import.buf+27, "...");

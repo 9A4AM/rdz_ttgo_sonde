@@ -18,6 +18,9 @@
 #include <ESPmDNS.h>
 #include <Ticker.h>
 #include "esp_heap_caps.h"
+#if FEATURE_NOTIFY
+#include <esp_random.h>
+#endif
 //#include <rtc_wdt.h>
 //#include "soc/timer_group_struct.h"
 //#include "soc/timer_group_reg.h"
@@ -39,6 +42,7 @@
 
 #include "src/pmu.h"
 #include "src/user.h"
+#include "src/crypto.h"
 
 
 /* Data exchange connectors */
@@ -51,8 +55,14 @@
 #if FEATURE_MQTT
 #include "src/conn-mqtt.h"
 #endif
+#if FEATURE_NOTIFY
+#include "src/conn-notify.h"
+#endif
 #if FEATURE_SDCARD
 #include "src/conn-sdcard.h"
+#endif
+#if FEATURE_SERIALOUT
+#include "src/conn-serialout.h"
 #endif
 #if FEATURE_APRS
 #include "src/conn-aprs.h"
@@ -62,6 +72,7 @@
 #endif
 
 #include "src/conn-system.h"
+#include "src/conn-cache.h"
 
 extern SemaphoreHandle_t globalLock;
 
@@ -82,17 +93,23 @@ Conn *connectors[] = { &connSystem,
 #if FEATURE_MQTT
 &connMQTT,
 #endif
+#if FEATURE_NOTIFY
+&connNotify,
+#endif
 #if FEATURE_SDCARD
 &connSDCard,
+#endif
+#if FEATURE_SERIALOUT
+&connSerialOut,
 #endif
 NULL };
 
 //#define ESP_MEM_DEBUG 1
 //int e;
 
-enum MainState { ST_DECODER, ST_SPECTRUM, ST_WIFISCAN, ST_UPDATE, ST_TOUCHCALIB, ST_RINEX_UPDATE, ST_FORMAT_SD };
+enum MainState { ST_DECODER, ST_SPECTRUM, ST_WIFISCAN, ST_UPDATE, ST_TOUCHCALIB, ST_RINEX_UPDATE, ST_FORMAT_SD, ST_AUTOSCAN };
 static MainState mainState = ST_WIFISCAN;
-const char *mainStateStr[] = {"DECODER", "SPECTRUM", "WIFISCAN", "UPDATE", "TOUCHCALIB", "RINEXUPDATE", "FORMATSD" };
+const char *mainStateStr[] = {"DECODER", "SPECTRUM", "WIFISCAN", "UPDATE", "TOUCHCALIB", "RINEXUPDATE", "FORMATSD", "AUTOSCAN" };
 
 AsyncWebServer server(80);
 
@@ -100,11 +117,17 @@ PMU *pmu = NULL;
 SemaphoreHandle_t axpSemaphore;
 extern uint8_t pmu_irq;
 
-const char *updateHost = "rdzsonde.org";
+// Selectable update servers (the download host lives here, not in the browser).
+// The web update page (upd.html) picks one via the POST button name; handleUpdatePost
+// sets updateHost/updatePort/updatePrefix accordingly before entering ST_UPDATE.
+const char *updateHostOfficial = "rdzsonde.org";        // main/dev2 branches
+const char *updateHostPy5ol   = "rdzttgo.nano.dev.br"; // single flat build (prefix "/")
+const char *updateHost = updateHostOfficial;            // active host for execOTA()
 int updatePort = 80;
 
 const char *updatePrefixM = "/main/";
 const char *updatePrefixD = "/dev2/";
+const char *updatePrefixP = "/";                        // py5ol flat layout
 const char *updatePrefix = updatePrefixM;
 const char *updateFs = "update.fs.bin";
 const char *updateIno = "update.ino.bin";
@@ -117,7 +140,8 @@ const int   daylightOffset_sec = 0; //UTC
 
 // Authentication management
 // BootID is embedded in index.html so client can invalidate auth cookie after ttgo reboot
-// defaultUserLevel is read from user.txt
+// defaultUserLevel: anonymous (not-logged-in) access level, derived from user.txt --
+// full access until the first user is registered, then no access (see getDefaultAuthLevel)
 char bootid[8];
 uint8_t defaultUserLevel = 2;
 
@@ -172,7 +196,16 @@ static int currentDisplay = 1;
 // timestamp when spectrum display was activated
 static unsigned long specTimer;
 
-void enterMode(int mode);
+void enterMode(int mode, bool force = false);
+void loopAutoScan();
+static void autoscanReset();
+// Auto-scan is on when configured; it then ignores the channel list entirely.
+static inline bool autoscanActive() { return sonde.config.autoscan_enable != 0; }
+// Scratch channel slot used by auto-scan for trial/locked decoding. It is the spare
+// last entry of sondeList (allocated with MAXSONDE+1 slots), i.e. OUTSIDE the configured
+// range [0,maxsonde) -- so it never overwrites a user channel and never shows up in the
+// QRG editor or the per-channel status/KML loops. setup() accepts this index specially.
+static inline int autoscanSlot() { return MAXSONDE; }
 void WiFiEvent(WiFiEvent_t event);
 
 
@@ -182,6 +215,27 @@ void WiFiEvent(WiFiEvent_t event);
 int checkAllowed(const char *filename) {
     if(!localUpdates && (strstr(filename, "localupd.txt") != NULL)) return 0;
     return 1;
+}
+
+// Files that hold credentials and must not be served to unauthenticated clients.
+bool isSensitiveFile(const char *url) {
+    static const char *deny[] = { "user.txt", "networks.txt", "config.txt" };
+    for(unsigned i=0; i<sizeof(deny)/sizeof(deny[0]); i++) {
+        if(strstr(url, deny[i]) != NULL) return true;
+    }
+    return false;
+}
+
+// Web assets (stylesheets, scripts, page templates, map/track overlays, images, fonts) that are
+// safe to serve to unauthenticated clients -- the public Home/Data/Livemap/login pages need them.
+// Anything else reaching the static fallback (notably the *.txt config/data files and GPSRESET)
+// is treated as private and requires a logged-in session.
+bool isPublicStaticAsset(const String &url) {
+    return url.endsWith(".css")  || url.endsWith(".js")   || url.endsWith(".html") ||
+           url.endsWith(".htm")  || url.endsWith(".gpx")  || url.endsWith(".kml")  ||
+           url.endsWith(".ico")  || url.endsWith(".png")  || url.endsWith(".jpg")  ||
+           url.endsWith(".jpeg") || url.endsWith(".gif")  || url.endsWith(".svg")  ||
+           url.endsWith(".woff") || url.endsWith(".woff2")|| url.endsWith(".ttf");
 }
 
 
@@ -270,11 +324,8 @@ String processor(const String& var) {
     if(localUpdates) return String(localUpdates);
     else return String();
   }
-  if (var == "PREAUTH") {
-    char preauth[COOKIE_SIZE];
-    generateRandomCookie("preauth",preauth);
-    storeCookie(preauth, -1);  // preauth value
-    return String(preauth);
+  if (var == "ALLOWFILEUPLOAD") {
+    return String(sonde.config.allowfileupload);
   }
   return String();
 }
@@ -341,8 +392,12 @@ void setupChannelList() {
       type = STYPE_MP3H;
     }
     else continue;
-    int active = space[3] == '+' ? 1 : 0;
-    if (space[4] == ' ') {
+    // active flag (space[3]) and launch site (space[5..]) are optional and only
+    // present on longer lines; guard the reads against the real line length so we
+    // do not read past the line terminator into the String's reserve capacity.
+    int rest = line.length() - (int)(space - line.c_str());
+    int active = (rest >= 4 && space[3] == '+') ? 1 : 0;
+    if (rest >= 5 && space[4] == ' ') {
       memset(launchsite, ' ', 16);
       strncpy(launchsite, space + 5, 16);
       if (sonde.config.debug == 1) {
@@ -355,7 +410,15 @@ void setupChannelList() {
   file.close();
 }
 
-const char *HTMLHEAD = "<!DOCTYPE html><html><head> <meta charset=\"UTF-8\"> <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\">";
+// Emit the standard HTML head into ptr, version-tagging style.css (?v=<version_id>) so browsers
+// refetch it whenever the firmware version changes. The static handlers cache assets aggressively
+// (max-age) as a network-stack workaround, so the query string is what busts that cache on update.
+void HTMLHEAD_V(char *ptr) {
+  sprintf(ptr, "<!DOCTYPE html><html><head> <meta charset=\"UTF-8\"> "
+               "<meta name=\"color-scheme\" content=\"light dark\"> "
+               "<script src=\"theme.js?v=%s\"></script> "
+               "<link rel=\"stylesheet\" type=\"text/css\" href=\"style.css?v=%s\">", version_id, version_id);
+}
 void HTMLBODY_OS(char *ptr, const char *which, const char *onsubmit) {
   strcat(ptr, "<body><form class=\"wrapper\" action=\"");
   strcat(ptr, which);
@@ -369,44 +432,167 @@ void HTMLBODY(char *ptr, const char *which) { HTMLBODY_OS(ptr, which, NULL); }
 void HTMLBODYEND(char *ptr) {
   strcat(ptr, "</div></form></body></html>");
 }
-void HTMLSAVEBUTTON(char *ptr) {
-  strcat(ptr, "</div><div class=\"footer\"><input type=\"submit\" class=\"save\" value=\"Save changes\"/>"
-         "<span class=\"ttgoinfo\">rdzTTGOserver ");
+// Render the form footer. The "Save changes" submit button is emitted only for level-2
+// (admin) viewers; level-1 users may view these forms but cannot save, so hiding the button
+// matches the server-side POST guard (which still enforces it regardless).
+// footerextra (admin-only) is injected into the footer between the Save button and the version
+// info -- used by the qrg/config forms for their backup/restore icon buttons.
+void HTMLSAVEBUTTON_F(char *ptr, int level, const char *footerextra) {
+  // footer-left groups the Save button with the (optional) backup/restore buttons so they sit
+  // next to each other on the left; the version info stays on the right (footer is space-between).
+  strcat(ptr, "</div><div class=\"footer\"><div class=\"footer-left\">");
+  if(level >= 2)
+    strcat(ptr, "<input type=\"submit\" class=\"save\" value=\"Save changes\"/>");
+  if(level >= 2 && footerextra)
+    strcat(ptr, footerextra);
+  strcat(ptr, "</div><span class=\"ttgoinfo\">rdzTTGOserver ");
   strcat(ptr, version_id);
   strcat(ptr, "</span>");
 }
+void HTMLSAVEBUTTON(char *ptr, int level) { HTMLSAVEBUTTON_F(ptr, level, NULL); }
+
+// Custom inline SVG icons (stroke uses currentColor -> inherits the button's white text colour).
+// Backup = "Save" (floppy disk); Restore = "Open" (folder) -- the classic save/open pairing.
+#define SVG_BACKUP "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" " \
+  "stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">" \
+  "<path d=\"M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z\"/>" \
+  "<polyline points=\"17 21 17 13 7 13 7 21\"/><polyline points=\"7 3 7 8 15 8\"/></svg>"
+#define SVG_RESTORE "<svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" " \
+  "stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\">" \
+  "<path d=\"M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z\"/>" \
+  "<polyline points=\"9 13 12 10 15 13\"/><line x1=\"12\" y1=\"10\" x2=\"12\" y2=\"16\"/></svg>"
+
+// Footer backup/restore controls for the qrg/config forms: a download (backup) link and an upload
+// (restore) button, both icon-only with hover tooltips. The upload button opens a hidden file
+// picker; selecting a file calls uploadCfgFile() (rdz.js), which confirms, uploads with the forced
+// destination name, then reboots. Download is served by GET /file (level-2 auth).
+const char *QRG_BACKUP_FOOTER =
+  "<input type=\"file\" id=\"qrgupl\" accept=\".txt\" style=\"display:none\" "
+    "onchange=\"uploadCfgFile('qrgupl','qrg.txt','frequency list')\">"
+  "<span class=\"bkpbtns\">"
+    "<a class=\"iconbtn\" href=\"/file/qrg.txt\" download=\"qrg.txt\" title=\"Download backup (qrg.txt)\">" SVG_BACKUP "</a>"
+    "<button type=\"button\" class=\"iconbtn\" title=\"Restore from file (qrg.txt)\" "
+      "onclick=\"document.getElementById('qrgupl').click()\">" SVG_RESTORE "</button>"
+  "</span>";
+const char *CONFIG_BACKUP_FOOTER =
+  "<input type=\"file\" id=\"cfgupl\" accept=\".txt\" style=\"display:none\" "
+    "onchange=\"uploadCfgFile('cfgupl','config.txt','configuration')\">"
+  "<span class=\"bkpbtns\">"
+    "<a class=\"iconbtn\" href=\"/file/config.txt\" download=\"config.txt\" title=\"Download backup (config.txt)\">" SVG_BACKUP "</a>"
+    "<button type=\"button\" class=\"iconbtn\" title=\"Restore from file (config.txt)\" "
+      "onclick=\"document.getElementById('cfgupl').click()\">" SVG_RESTORE "</button>"
+  "</span>";
 
 const char *handleLoginPost(AsyncWebServerRequest * request) {
   LOG_D(TAG, "Handling login POST request");
 
   const AsyncWebParameter *userp = request->getParam("user", true, false);
-  const AsyncWebParameter *authp = request->getParam("auth", true, false);
-  const AsyncWebParameter *preauthp= request->getParam("preauth", true, false);
-  if (!userp || !authp || !preauthp) {
+  const AsyncWebParameter *passp = request->getParam("password", true, false);
+  if (!userp || !passp) {
     request->send(400, "text/plain", "Invalid Request");
     return nullptr;
   }
 
   String username = userp->value();
-  String preauth = preauthp->value();
-  String auth = authp->value();
+  String password = passp->value();
 
-  int ulvl = getUserPermissions(username.c_str(), preauth.c_str(), auth.c_str());
-  if(ulvl> 0) {
-    // Generate a new session cookie
+  int ulvl = verifyPassword(username.c_str(), password.c_str());
+  if (ulvl > 0) {
+    // Issue a stateless JWT session token (signed with the device key; survives reboot).
     char cookie[COOKIE_SIZE];
-    generateRandomCookie(username.c_str(), cookie);
-    if(upgradeCookie(preauth.c_str(), cookie, ulvl)==0) {
-      // Set cookie and redirect
+    if (jwtCreate(username.c_str(), ulvl, SESSION_TTL_SEC, cookie, sizeof(cookie)) > 0) {
       AsyncWebServerResponse *response = request->beginResponse(302);
-      response->addHeader("Location","/index.html");
+      response->addHeader("Location", "/index.html");
       response->addHeader("Set-Cookie", "SESSION=" + String(cookie) + "; Path=/; SameSite=Strict");
       request->send(response);
       return nullptr;
     }
   }
-  request->send(401, "text/plain", "Invalid credentials or session expired");
+  request->send(401, "text/plain", "Invalid credentials");
   return nullptr;
+}
+
+// Extract the SESSION cookie value from a request, or "" if none. dst must hold at least COOKIE_SIZE bytes.
+static void getSessionCookie(AsyncWebServerRequest *request, char *dst, int maxlen) {
+  dst[0] = 0;
+  if(!request->hasHeader("Cookie")) return;
+  String cookieHdr = request->getHeader("Cookie")->value();
+  // Match "SESSION=" only at a cookie-name boundary (start of header or after a ';'),
+  // so we don't accidentally match it inside another cookie name like "MYSESSION=".
+  int from = 0;
+  while(true) {
+    int start = cookieHdr.indexOf("SESSION=", from);
+    if(start == -1) return;
+    bool boundary = (start == 0);
+    if(!boundary) {
+      int p = start - 1;
+      while(p >= 0 && cookieHdr[p] == ' ') p--;  // skip the separator's whitespace
+      boundary = (p >= 0 && cookieHdr[p] == ';');
+    }
+    if(boundary) {
+      start += strlen("SESSION=");
+      int end = cookieHdr.indexOf(';', start);
+      String session = (end==-1) ? cookieHdr.substring(start) : cookieHdr.substring(start, end);
+      session.trim();
+      strlcpy(dst, session.c_str(), maxlen);
+      return;
+    }
+    from = start + 1;
+  }
+}
+
+void handleLogout(AsyncWebServerRequest * request) {
+  // Sessions are stateless JWTs (nothing to revoke server-side), so logout just clears
+  // the client cookie and returns to the login page. To invalidate ALL sessions at once,
+  // rotate the JWT signing key (see the control page).
+  AsyncWebServerResponse *response = request->beginResponse(302);
+  response->addHeader("Location", "/login.html");
+  response->addHeader("Set-Cookie", "SESSION=; Path=/; Max-Age=0; SameSite=Strict");
+  request->send(response);
+}
+
+// Guard for the user-management endpoints: open only while no users exist yet, so the first
+// user can be created on a clean device. Once any named user exists it requires a real
+// authenticated level-2 session -- the open default access level is intentionally NOT honored
+// here, so user management is locked down as soon as the first account is created.
+bool isUserMgmtAllowed(AsyncWebServerRequest * request) {
+  if(!hasNamedUsers()) return true;   // clean environment: allow creating the first user
+  char session[COOKIE_SIZE];
+  getSessionCookie(request, session, COOKIE_SIZE);
+  if(session[0] && getCookieAuthLevel(session) >= 2) return true;
+  AsyncWebServerResponse *response = request->beginResponse(302);
+  response->addHeader("Location", "/login.html");
+  request->send(response);
+  return false;
+}
+
+// Handle add/update/delete of named users (POST /users.html). Access checked by caller.
+void handleUsersPost(AsyncWebServerRequest * request) {
+  const AsyncWebParameter *actionp = request->getParam("action", true);
+  const AsyncWebParameter *userp = request->getParam("user", true);
+  if(!actionp || !userp) { request->send(400, "text/plain", "missing parameters"); return; }
+  String action = actionp->value();
+  String user = userp->value();
+  int res = -1;
+  if(action == "add") {
+    const AsyncWebParameter *levelp = request->getParam("level", true);
+    const AsyncWebParameter *passp = request->getParam("pass", true);
+    if(!levelp || !passp) { request->send(400, "text/plain", "missing parameters"); return; }
+    res = setUser(user.c_str(), levelp->value().toInt(), passp->value().c_str());
+  } else if(action == "del") {
+    res = deleteUser(user.c_str());
+  } else {
+    request->send(400, "text/plain", "unknown action");
+    return;
+  }
+  if(res == 0) {
+    // Creating the first user closes anonymous access (getDefaultAuthLevel() returns 0
+    // once a user is registered). Re-read it so the lockdown takes effect immediately.
+    defaultUserLevel = getDefaultAuthLevel();
+    request->send(200, "text/plain", "ok");
+  }
+  else if(res == -2) request->send(409, "text/plain", "cannot remove or demote the last administrator");
+  else request->send(400, "text/plain", "error");
 }
 
 const char *getQRGAsJson() {
@@ -425,10 +611,10 @@ const char *getQRGAsJson() {
   return message;
 }
 
-const char *createQRGForm() {
+const char *createQRGForm(int level) {
   char *ptr = message;
-  strcpy(ptr, HTMLHEAD);
-  strcat(ptr, "<script src=\"rdz.js\"></script></head>");
+  HTMLHEAD_V(ptr);
+  sprintf(ptr + strlen(ptr), "<script src=\"rdz.js?v=%s\"></script><script src=\"dialog.js?v=%s\"></script></head>", version_id, version_id);
   HTMLBODY(ptr, "qrg.html");
   //strcat(ptr, "<body><form class=\"wrapper\" action=\"qrg.html\" method=\"post\"><div class=\"content\"><table><tr><th>ID</th><th>Active</th><th>Freq</th><th>Launchsite</th><th>Mode</th></tr>");
   strcat(ptr, "<script>\nvar qrgs = [];\n");
@@ -440,7 +626,10 @@ const char *createQRGForm() {
   strcat(ptr, "<div id=\"divTable\"></div>");
   strcat(ptr, "<script> qrgTable() </script>\n");
   //</div><div class=\"footer\"><input type=\"submit\" class=\"update\" value=\"Update\"/>");
-  HTMLSAVEBUTTON(ptr);
+  // Backup/restore icon buttons live in the footer (see QRG_BACKUP_FOOTER). The hidden file input
+  // has no name attribute, so it is never submitted with this page's Save form; picking a file
+  // triggers uploadCfgFile (rdz.js), which confirms, uploads as qrg.txt, then reboots.
+  HTMLSAVEBUTTON_F(ptr, level, QRG_BACKUP_FOOTER);
   HTMLBODYEND(ptr);
   LOG_D(TAG, "QRG form: size=%d bytes\n", strlen(message));
   return message;
@@ -476,7 +665,8 @@ const char *handleQRGPost(AsyncWebServerRequest * request) {
     if (!type) continue;
     String fstring = freq->value();
     String tstring = type->value();
-    String sstring = launchsite->value();
+    // launchsite (S%d) is optional in the POST; default to empty if missing
+    String sstring = launchsite ? launchsite->value() : String("");
     const char *fstr = fstring.c_str();
     const char *tstr = tstring.c_str();
     const char *sstr = sstring.c_str();
@@ -512,7 +702,7 @@ int updateWiFi(String ssid, String pw) {
         if(!file) return -1;
         for(int i=0; i<nNetworks; i++) {
                 if(networks[i].id && networks[i].pw) {
-                        file.printf("%s\n%s\n", networks[i].id, networks[i].pw);
+                        file.printf("%s\n%s\n", networks[i].id.c_str(), networks[i].pw.c_str());
                 }
         }
         file.close(); 
@@ -533,7 +723,7 @@ void setupWifiList() {
   }
   int i = 0;
 
-  while (file.available()) {
+  while (file.available() && i < MAX_WIFI) {
     String line = readLine(file);  //file.readStringUntil('\n');
     if (!file.available()) break;
     networks[i].id = line;
@@ -543,7 +733,7 @@ void setupWifiList() {
   nNetworks = i;
   LOG_I(TAG, "%d networks in networks.txt\n", i);
   for (int j = 0; j < i; j++) {
-    LOG_I(TAG, "%s: %s\n", networks[j].id, networks[j].pw);
+    LOG_I(TAG, "%s: %s\n", networks[j].id.c_str(), networks[j].pw.c_str());
   }
 }
 
@@ -566,8 +756,8 @@ const String quoteString(const char *s) {
 const char *createWIFIForm() {
   char *ptr = message;
   char tmp[4];
-  strcpy(ptr, HTMLHEAD);
-  strcat(ptr, "<script src=\"rdz.js\"></script></head>");
+  HTMLHEAD_V(ptr);
+  sprintf(ptr + strlen(ptr), "<script src=\"rdz.js?v=%s\"></script></head>", version_id);
   HTMLBODY(ptr, "wifi.html");
   strcat(ptr, "<table><tr><th>Nr</th><th>SSID</th><th>Password</th></tr>");
   for (int i = 0; i < MAX_WIFI; i++) {
@@ -581,7 +771,7 @@ const char *createWIFIForm() {
   }
   strcat(ptr, "</table><script>footer()</script>");
   //</div><div class=\"footer\"><input type=\"submit\" class=\"update\" value=\"Update\"/>");
-  HTMLSAVEBUTTON(ptr);
+  HTMLSAVEBUTTON(ptr, 2);   // WiFi is level-2 only, so the viewer is always an admin
   HTMLBODYEND(ptr);
   LOG_D(TAG, "WIFI form: size=%d bytes\n", strlen(message));
   return message;
@@ -656,10 +846,9 @@ void addSondeStatus(char *ptr, int i)
 
 const char *createStatusForm() {
   char *ptr = message;
-  strcpy(ptr, HTMLHEAD);
+  HTMLHEAD_V(ptr);
   strcat(ptr, "<meta http-equiv=\"refresh\" content=\"5\"></head>");
   HTMLBODY(ptr, "status.html");
-  strcat(ptr, "<div class=\"content\">");
 
   for (int i = 0; i < sonde.config.maxsonde; i++) {
     int snum = (i + sonde.currentSonde) % sonde.config.maxsonde;
@@ -667,6 +856,9 @@ const char *createStatusForm() {
       addSondeStatus(ptr, snum);
     }
   }
+  // Close the content div and emit the footer as a sibling (full width, pinned at the
+  // bottom) -- same structure as the other forms. Nesting it inside .content would put the
+  // footer in the scroll area, so it would scroll and be constrained to the column width.
   strcat(ptr, "</div><div class=\"footer\"><span></span>"
          "<span class=\"ttgoinfo\">rdzTTGOserver ");
   strcat(ptr, version_id);
@@ -684,6 +876,11 @@ const char *createLiveJson() {
   strcpy(ptr, "{\"sonde\": {");
   // use the same JSON format here as for MQTT and for the Android App
   sonde2json( ptr + strlen(ptr), 1024, s );
+  // Expose validPos so livemap can tell a fresh fix from a kept/old one (bit 0x80
+  // = "position is old"): a frame number can advance without a matching position
+  // (RS41 pos subframe CRC fail / all-zeros, DFM missed lat/lon block), and we must
+  // not plot that stale position under the newer frame number.
+  sprintf(ptr + strlen(ptr), ", \"validPos\": %d", s->d.validPos);
 #if 0
   sprintf(ptr + strlen(ptr), "\"sonde\": {\"rssi\": %d, \"vframe\": %d, \"time\": %d,\"id\": \"%s\", \"freq\": %3.3f, \"type\": \"%s\"",
           s->rssi, s->d.vframe, s->d.time, s->d.id, s->freq, sondeTypeStr[sonde.realType(s)]);
@@ -711,8 +908,127 @@ const char *createLiveJson() {
   strcat(ptr, "}");
   return message;
 }
+
+// Timestamp (millis) of the last /spectrum.json poll. The scan-plot page polls
+// every few seconds while open, so a recent value means a browser is watching.
+// Written here (web task), read by maybeScanPlotSweep() (RX task); a 32-bit
+// aligned load/store is atomic on ESP32, so no lock is needed.
+volatile unsigned long lastSpectrumPollMs = 0;
+
+// Auto-scan status snapshot for the web scan-plot. Written by loopAutoScan() in the
+// main loop, read by createSpectrumJson() in the web task. Display-only, so the
+// occasional mixed read is harmless (same lock-free convention as scandisp[]).
+#define AUTOSCAN_MAXPK 16
+volatile int autoscanWebState = 0;        // 0=sweeping, 1=trial-decoding
+volatile float autoscanWebTryFreq = 0;    // MHz currently being trial-decoded
+volatile int autoscanWebTryType = -1;     // SondeType being tried (-1=none)
+volatile int autoscanWebNpeaks = 0;       // peaks found in the last sweep
+float autoscanWebPeakF[AUTOSCAN_MAXPK];   // detected peak frequencies (MHz)
+volatile int autoscanWebPeakN = 0;        // valid entries in autoscanWebPeakF[]
+
+// millis() of the last valid frame from the auto-locked sonde; the locked decode
+// holds until norx_timeout seconds elapse with no frame, then re-scans.
+unsigned long autoLockGoodMs = 0;
+
+const char *createSpectrumJson() {
+  // Reads scandisp[]/peakf lock-free from the web task while the RX task may be
+  // sweeping; mirrors createLiveJson(). Display-only data, so a momentarily mixed
+  // row is harmless; seq lets the client detect/ignore an in-progress sweep.
+  lastSpectrumPollMs = millis();
+  char *ptr = message;
+  SondeInfo *s = &sonde.sondeList[sonde.currentSonde];
+  int n = scanner.dispW();
+  const int *data = scanner.dispData();
+  int rx = (s->lastState == 1) ? 1 : 0;
+  uint32_t lastms = scanner.webMillis();
+  unsigned long age = lastms ? (millis() - lastms) : 0;
+
+  ptr += sprintf(ptr,
+    "{\"seq\":%u,\"age_ms\":%lu,\"startfreq\":%.5g,\"step\":%.5f,\"n\":%d,"
+    "\"noisefloor\":%d,\"peak\":%.3f,\"interval\":%d,\"status\":\"%s\"",
+    (unsigned)scanner.webSeq(), age, sonde.config.startfreq, scanner.stepMHz(),
+    n, sonde.config.noisefloor, scanner.peakMHz(), sonde.config.scanplotint,
+    rx ? "rx" : "idle");
+
+  if (rx) {
+    ptr += sprintf(ptr, ",\"rxfreq\":%3.3f,\"rxname\":\"%s\"", s->freq, s->d.id);
+  }
+
+  // Auto-scan status (only when running in auto-scan mode)
+  if (autoscanActive()) {
+    ptr += sprintf(ptr, ",\"autoscan\":1,\"as_state\":\"%s\",\"as_npeaks\":%d",
+                   (autoscanWebState == 2) ? "qrg" : (autoscanWebState ? "trial" : "sweep"), autoscanWebNpeaks);
+    if (autoscanWebState && autoscanWebTryType >= 0 && autoscanWebTryType < NSondeTypes) {
+      ptr += sprintf(ptr, ",\"as_tryfreq\":%.3f,\"as_trytype\":\"%s\"",
+                     autoscanWebTryFreq, sondeTypeStr[autoscanWebTryType]);
+    }
+    ptr += sprintf(ptr, ",\"as_peaks\":[");
+    int pn = autoscanWebPeakN; if (pn > AUTOSCAN_MAXPK) pn = AUTOSCAN_MAXPK;
+    for (int i = 0; i < pn; i++) ptr += sprintf(ptr, "%s%.3f", i ? "," : "", autoscanWebPeakF[i]);
+    ptr += sprintf(ptr, "]");
+  }
+
+  // scandisp holds -RssiValue; RSSI[dBm] = -RssiValue/2, so emit data/2.0 as dBm
+  // (same convention as the sonde rssi reported to SondeHub). noisefloor is already dBm.
+  ptr += sprintf(ptr, ",\"data\":[");
+  for (int i = 0; i < n; i++) {
+    ptr += sprintf(ptr, "%s%.1f", i ? "," : "", data[i] / 2.0);
+  }
+  strcpy(ptr, "]}");
+  return message;
+}
 ///////////////////// Config form
 
+
+#if FEATURE_NOTIFY
+// Auto-provision a stable, unguessable ntfy topic on first boot when none is configured, so
+// the user doesn't have to invent one. Generated once (hardware RNG) and appended to
+// /config.txt so it survives reboots -- a per-boot-random topic would break the phone's
+// subscription on every restart. It then shows in the config form as the topic to subscribe to.
+static void ensureNotifyTopic() {
+  if (sonde.config.notify.topic[0] != 0) return;   // already configured or provisioned
+  static const char alpha[] = "abcdefghijklmnopqrstuvwxyz0123456789";
+  char *t = sonde.config.notify.topic;             // char[48]
+  strcpy(t, "rdzsonde-");
+  int base = strlen(t);
+  for (int i = 0; i < 12; i++) t[base + i] = alpha[esp_random() % 36];
+  t[base + 12] = 0;
+
+  // Persist so the topic survives reboots (a per-boot-random topic would break the phone
+  // subscription). Rewrite config.txt via a temp file + atomic rename, replacing the
+  // existing "notify.topic=" line in place (or appending if none) -- a clean single key,
+  // and no risk of concatenating onto a non-newline-terminated last line.
+  File in = LittleFS.open("/config.txt", "r");
+  File out = LittleFS.open("/config.tmp", "w");
+  if (!in || !out) {
+    if (in) in.close();
+    if (out) { out.close(); LittleFS.remove("/config.tmp"); }
+    LOG_W(TAG, "notify: could not persist generated topic '%s' (will regenerate next boot)\n", t);
+    return;
+  }
+  bool replaced = false;
+  while (in.available()) {
+    String line = readLine(in);                    // trailing \r/\n already stripped
+    const char *p = line.c_str();
+    while (*p == ' ' || *p == '\t') p++;            // match ignoring leading indentation
+    if (strncmp(p, "notify.topic=", 13) == 0) {
+      out.printf("notify.topic=%s\n", t);
+      replaced = true;
+    } else {
+      out.print(line); out.print("\n");
+    }
+  }
+  if (!replaced) out.printf("notify.topic=%s\n", t);
+  in.close();
+  out.close();
+  if (LittleFS.rename("/config.tmp", "/config.txt")) {
+    LOG_I(TAG, "notify: generated ntfy topic '%s'\n", t);
+  } else {
+    LittleFS.remove("/config.tmp");
+    LOG_W(TAG, "notify: generated topic '%s' but failed to persist (will regenerate next boot)\n", t);
+  }
+}
+#endif
 
 void setupConfigData() {
   File file = LittleFS.open("/config.txt", "r");
@@ -725,12 +1041,17 @@ void setupConfigData() {
     sonde.setConfig(line.c_str());
   }
   sonde.checkConfig(); // eliminate invalid entries
+  file.close();   // release the read handle before ensureNotifyTopic() may rewrite config.txt
+#if FEATURE_NOTIFY
+  ensureNotifyTopic();
+#endif
 }
 
 
 struct st_configitems config_list[] = {
   /* General config settings */
   {"wifi", 0, &sonde.config.wifi},
+  {"cachesize", 0, &sonde.config.cachesize},
   {"debug", 0, &sonde.config.debug},
   {"maxsonde", 0, &sonde.config.maxsonde},
   {"rxlat", -7, &sonde.config.rxlat},
@@ -743,12 +1064,29 @@ struct st_configitems config_list[] = {
   {"dispcontrast", 0, &sonde.config.dispcontrast},
   /* Spectrum display settings */
   {"spectrum", 0, &sonde.config.spectrum},
-  {"startfreq", 0, &sonde.config.startfreq},
+  {"startfreq", -7, &sonde.config.startfreq},
   {"channelbw", 0, &sonde.config.channelbw},
   {"marker", 0, &sonde.config.marker},
   {"noisefloor", 0, &sonde.config.noisefloor},
+  {"scanplotint", 0, &sonde.config.scanplotint},
+  {"scan_smooth", 0, &sonde.config.scan_smooth},
+  {"scan_addwait", 0, &sonde.config.scan_addwait},
+  {"scan_iter", 0, &sonde.config.scan_iter},
+  /* Auto-scan (peak detection) settings; used when autoscan_enable=1 */
+  {"autoscan_enable", 0, &sonde.config.autoscan_enable},
+  {"autoscan_snr", 0, &sonde.config.autoscan_snr},
+  {"autoscan_mindist", 0, &sonde.config.autoscan_mindist},
+  {"autoscan_quant", 0, &sonde.config.autoscan_quant},
+  {"autoscan_maxpeaks", 0, &sonde.config.autoscan_maxpeaks},
+  {"autoscan_dwell", 0, &sonde.config.autoscan_dwell},
+  {"autoscan_typedwell", 0, &sonde.config.autoscan_typedwell},
+  {"autoscan_qrgfirst", 0, &sonde.config.autoscan_qrgfirst},
+  {"autoscan_exclude", 63, &sonde.config.autoscan_exclude},
+  {"allowfileupload", 0, &sonde.config.allowfileupload},
   /* decoder settings */
   {"freqofs", 0, &sonde.config.freqofs},
+  {"lnaboost", 0, &sonde.config.lnaboost},
+  {"lnagain", 0, &sonde.config.lnagain},
   {"rs41.agcbw", 0, &sonde.config.rs41.agcbw},
   {"rs41.rxbw", 0, &sonde.config.rs41.rxbw},
   {"rs92.rxbw", 0, &sonde.config.rs92.rxbw},
@@ -793,6 +1131,15 @@ struct st_configitems config_list[] = {
    {"ss.host", 63, &sonde.config.ss.host},
    {"ss.port", 0, &sonde.config.ss.port},
 #endif
+#if FEATURE_NOTIFY
+  /* Sonde notifications (ntfy) */
+  {"notify.active", 0, &sonde.config.notify.active},
+  {"notify.dist", 0, &sonde.config.notify.dist},
+  {"notify.alt", 0, &sonde.config.notify.alt},
+  {"notify.server", 95, sonde.config.notify.server},
+  {"notify.topic", 47, sonde.config.notify.topic},
+  {"notify.token", 63, sonde.config.notify.token},
+#endif
 #if FEATURE_MQTT
   /* MQTT */
   {"mqtt.active", 0, &sonde.config.mqtt.active},
@@ -813,6 +1160,11 @@ struct st_configitems config_list[] = {
   {"sd.sync", 0, &sonde.config.sd.sync},
   {"sd.name", 0, &sonde.config.sd.name},
   {"sd.speed", 0, &sonde.config.sd.speed},
+#endif
+#if FEATURE_SERIALOUT
+  {"serialout.format", 0, &sonde.config.serialout.format},
+  {"serialout.txd", 0, &sonde.config.serialout.txd},
+  {"serialout.baud", 0, &sonde.config.serialout.baud},
 #endif
   /* Hardware dependeing settings */
   {"disptype", 0, &sonde.config.disptype},
@@ -858,13 +1210,13 @@ struct st_configitems config_list[] = {
 
 const int N_CONFIG = (sizeof(config_list) / sizeof(struct st_configitems));
 
-const char *createConfigForm() {
+const char *createConfigForm(int level) {
   char *ptr = message;
-  strcpy(ptr, HTMLHEAD);
-  strcat(ptr, "<script src=\"rdz.js\"></script></head>");
-  HTMLBODY_OS(ptr, "config.html", "return checkForDuplicates()");
+  HTMLHEAD_V(ptr);
+  sprintf(ptr + strlen(ptr), "<script src=\"rdz.js?v=%s\"></script><script src=\"dialog.js?v=%s\"></script></head>", version_id, version_id);
+  HTMLBODY_OS(ptr, "config.html", "return checkForDuplicates(this)");
   strcat(ptr, "<div id=\"cfgtab\"></div>");
-  strcat(ptr, "<script src=\"cfg.js\"></script>");
+  sprintf(ptr + strlen(ptr), "<script src=\"cfg.js?v=%s\"></script>", version_id);
   strcat(ptr, "<script>\n");
   sprintf(ptr + strlen(ptr), "var scr=\"Using /screens%d.txt", Display::getScreenIndex(sonde.config.screenfile));
   for (int i = 0; i < disp.nLayouts; i++) {
@@ -907,7 +1259,10 @@ const char *createConfigForm() {
   }
   strcat(ptr, "configTable();\n </script>");
   strcat(ptr, "<script>footer()</script>");
-  HTMLSAVEBUTTON(ptr);
+  // Backup/restore icon buttons live in the footer (see CONFIG_BACKUP_FOOTER). The hidden file
+  // input has no name attribute, so it is never submitted with this page's Save form; picking a
+  // file triggers uploadCfgFile (rdz.js), which confirms, uploads as config.txt, then reboots.
+  HTMLSAVEBUTTON_F(ptr, level, CONFIG_BACKUP_FOOTER);
   HTMLBODYEND(ptr);
   LOG_D(TAG, "Config form: size=%d bytes\n", strlen(message));
   return message;
@@ -935,7 +1290,9 @@ const char *handleConfigPost(AsyncWebServerRequest * request) {
   for (int i = 0; i < params; i++) {
     String strlabel = request->getParam(i)->name();
     const char *label = strlabel.c_str();
-    if (label[strlen(label) - 1] == '#') continue;
+    size_t labellen = strlen(label);
+    if (labellen == 0) continue;	// empty parameter name => label[-1] read
+    if (label[labellen - 1] == '#') continue;
     const AsyncWebParameter *value = request->getParam(label, true);
     if (!value) continue;
     String strvalue = value->value();
@@ -952,6 +1309,11 @@ const char *handleConfigPost(AsyncWebServerRequest * request) {
     //int wlen = f.printf("%s=%s\n", config_list[idx].name, strvalue.c_str());
     int wlen = f.printf("%s=%s\n", label, strvalue.c_str());
     LOG_D(TAG, "Written bytes: %d\n", wlen);
+  }
+  // allowfileupload is a hidden option (not rendered in cfg.js), so it is never part of
+  // the submitted form. Re-emit it when enabled so saving the config form does not wipe it.
+  if (sonde.config.allowfileupload) {
+    f.printf("allowfileupload=%d\n", sonde.config.allowfileupload);
   }
   LOG_D(TAG, "Flushing file\n");
   f.flush();
@@ -986,17 +1348,98 @@ const char *ctrllabel[] = {"Receiver/next freq. (short keypress)", "Scanner (dou
 			   "Reboot"
                           };
 
-const char *createControlForm() {
+// Human-readable description of a display action code (see ACT_* in Sonde.h).
+// Used to label the control-page keypress buttons with what each press actually
+// does on the screen the device is currently showing.
+static const char *actionDescr(uint8_t act) {
+  switch (act) {
+    case ACT_NONE:             return "no function";
+    case ACT_DISPLAY_SCANNER:  return "scanner";
+    case ACT_DISPLAY_WIFI:     return "WiFi screen";
+    case ACT_DISPLAY_SPECTRUM: return "spectrum";
+    case ACT_DISPLAY_DEFAULT:  return "default screen";
+    case ACT_DISPLAY_NEXT:     return "next screen";
+    case ACT_NEXTSONDE:        return "next frequency";
+    case ACT_PREVSONDE:        return "previous frequency";
+    case ACT_RINEX_UPDATE:     return "update RINEX";
+    case ACT_FORMAT_SD:        return "format SD card";
+  }
+  static char abuf[20];
+  if (act < ACT_MAXDISPLAY) snprintf(abuf, sizeof(abuf), "screen %d", act);
+  else                      snprintf(abuf, sizeof(abuf), "action %d", act);
+  return abuf;
+}
+
+// True if action 'act' switches the active display to a different screen. Such a press
+// changes what every control button does, so the control page must reload to relabel them.
+static bool actionChangesScreen(uint8_t act) {
+  if (act == ACT_DISPLAY_NEXT || act == ACT_DISPLAY_DEFAULT) return true;
+  return act < ACT_MAXDISPLAY;   // ACT_DISPLAY(n): jump to a specific screen (incl. scanner)
+}
+
+const char *createControlForm(int authLevel, bool reloadAfter) {
   char *ptr = message;
-  strcpy(ptr, HTMLHEAD);
+  HTMLHEAD_V(ptr);
+  // confirmSubmit() guards the destructive/disruptive control buttons (Format SD, Reboot) with
+  // the project's styled confirmation. It cancels the immediate submit, shows showConfirm(), and
+  // -- only on accept -- re-submits the form with a hidden field carrying the button's name (a
+  // programmatic submit() would otherwise drop the clicked submit button's name/value).
+  strcat(ptr, "<script src=\"dialog.js?v=");
+  strcat(ptr, version_id);
+  strcat(ptr, "\"></script><script>function confirmSubmit(b,msg){"
+              "showConfirm(msg).then(function(ok){if(!ok)return;"
+              "var h=document.createElement('input');h.type='hidden';h.name=b.name;h.value=b.value;"
+              "b.form.appendChild(h);b.form.submit();});return false;}"
+              // Reboot uses the same reload logic as firmware update / config restore: confirm,
+              // capture the boot nonce, fire the reboot POST (no response -- the device restarts at
+              // once), then poll /bootid and reload the page once it is back online.
+              "function confirmReboot(msg){showConfirm(msg).then(function(ok){if(!ok)return;"
+              "fetch('/bootid',{cache:'no-store'}).then(function(r){return r.ok?r.text():'';})"
+              ".catch(function(){return '';}).then(function(before){"
+              "fetch('/control.html',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'reboot=1'}).catch(function(){});"
+              "waitForRebootAndReload((before||'').trim(),'Rebooting','The device is rebooting.');});});return false;}</script>");
   strcat(ptr, "</head>");
   HTMLBODY(ptr, "control.html");
+  if (reloadAfter) {
+    // The press just queued a screen switch; the main loop applies it asynchronously.
+    // Reload (GET, so the press is not repeated) shortly after, to show the new labels.
+    strcat(ptr, "<script>setTimeout(function(){location.href='/control.html';},700);</script>");
+  }
+  // The first 8 control buttons (ctrlid rx/scan/spec/wifi + rx2/scan2/spec2/wifi2) map to the
+  // key1/key2 short/double/medium/long actions[1..8] of the current screen. Label them with
+  // what they actually do right now (function first, then which button/keypress triggers it),
+  // and disable the ones with no function; entries >= 8 keep their static label (RINEX/Format/Reboot).
+  static const char *kpName[] = {"short", "double", "medium", "long"};
+  char dynlabel[64];
   for (int i = 0; i < sizeof(ctrllabel)/sizeof((ctrllabel)[0]); i++) {
+#if FEATURE_SDCARD
+    // Formatting the SD card is destructive: only offer it to admin (level 2) users.
+    if (strcmp(ctrlid[i], "format") == 0 && authLevel < 2) continue;
+#endif
+    const char *label = ctrllabel[i];
+    bool disabled = false;
+    if (i < 8) {
+      uint8_t act = disp.layout ? disp.layout->actions[i + 1] : ACT_NONE;
+      snprintf(dynlabel, sizeof(dynlabel), "%s (button %d %s keypress)",
+               actionDescr(act), (i < 4) ? 1 : 2, kpName[i & 3]);
+      // Capitalize the first letter so it reads as a button caption.
+      if (dynlabel[0] >= 'a' && dynlabel[0] <= 'z') dynlabel[0] -= ('a' - 'A');
+      label = dynlabel;
+      disabled = (act == ACT_NONE);   // nothing happens on this press -> grey it out
+    }
     strcat(ptr, "<input class=\"ctlbtn\" type=\"submit\" name=\"");
     strcat(ptr, ctrlid[i]);
     strcat(ptr, "\" value=\"");
-    strcat(ptr, ctrllabel[i]);
-    strcat(ptr, "\"></input>");
+    strcat(ptr, label);
+    strcat(ptr, "\"");                        // close the value attribute
+    // Destructive/disruptive actions get a styled confirmation before the form submits.
+#if FEATURE_SDCARD
+    if (strcmp(ctrlid[i], "format") == 0)
+      strcat(ptr, " onclick=\"return confirmSubmit(this,'Format the SD card?\\nThis permanently erases all data on the card.');\"");
+#endif
+    if (strcmp(ctrlid[i], "reboot") == 0)
+      strcat(ptr, " onclick=\"return confirmReboot('Reboot the device now?');\"");
+    strcat(ptr, disabled ? " disabled></input>" : "></input>");
     if (i == 3 || i == 7 ) {
       strcat(ptr, "<p></p>");
     }
@@ -1011,47 +1454,45 @@ const char *createControlForm() {
 }
 
 
-const char *handleControlPost(AsyncWebServerRequest * request) {
+// Handle a control-page POST. Returns true if the press switched the active screen, so the
+// caller knows the control page should reload to relabel the (now changed) buttons.
+bool handleControlPost(AsyncWebServerRequest * request, int authLevel) {
   LOG_D(TAG, "Handling control post request");
+  bool screenChanged = false;
   int params = request->params();
   for (int i = 0; i < params; i++) {
     String param = request->getParam(i)->name();
-    LOG_D(TAG, "Contral post: %s\n", param.c_str());
-    if (param.equals("rx")) {
-      button1.pressed = KP_SHORT;
+    LOG_D(TAG, "Control post: %s\n", param.c_str());
+    // The 8 keypress buttons ctrlid[0..7] (rx/scan/spec/wifi + rx2/scan2/spec2/wifi2) map to
+    // button1/button2 short/double/medium/long, i.e. actions[1..8] of the current screen.
+    int kp = -1;
+    for (int k = 0; k < 8; k++) {
+      if (param.equals(ctrlid[k])) { kp = k; break; }
     }
-    else if (param.equals("scan")) {
-      button1.pressed = KP_DOUBLE;
-    }
-    else if (param.equals("spec")) {
-      button1.pressed = KP_MID;
-    }
-    else if (param.equals("wifi")) {
-      button1.pressed = KP_LONG;
-    }
-    else if (param.equals("rx2")) {
-      button2.pressed = KP_SHORT;
-    }
-    else if (param.equals("scan2")) {
-      button2.pressed = KP_DOUBLE;
-    }
-    else if (param.equals("spec2")) {
-      button2.pressed = KP_MID;
-    }
-    else if (param.equals("wifi2")) {
-      button2.pressed = KP_LONG;
+    if (kp >= 0) {
+      Button *b = (kp < 4) ? &button1 : &button2;
+      b->pressed = (KeyPress)(KP_SHORT + (kp & 3));   // KP_SHORT/DOUBLE/MID/LONG
+      uint8_t act = disp.layout ? disp.layout->actions[kp + 1] : ACT_NONE;
+      if (actionChangesScreen(act)) screenChanged = true;
     }
     else if (param.equals("rinex")) {
       button2.pressed = KP_RINEX;
     }
     else if (param.equals("format")) {
-      button2.pressed = KP_FORMAT;
+      // Formatting the SD card is destructive: only admin (level 2) users may trigger it.
+      if (authLevel >= 2) button2.pressed = KP_FORMAT;
+      else LOG_W(TAG, "Rejected SD format request: insufficient auth level (%d)\n", authLevel);
     }
     else if (param.equals("reboot")) {
       ESP.restart();
     }
+    else if (param.equals("logout_all")) {
+      // Rotate the JWT signing key so every existing session token becomes invalid.
+      if (authLevel >= 2) rotateJwtKey();
+      else LOG_W(TAG, "Rejected logout-all request: insufficient auth level (%d)\n", authLevel);
+    }
   }
-  return "";
+  return screenChanged;
 }
 
 void handleUpload(AsyncWebServerRequest * request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
@@ -1110,6 +1551,7 @@ int streamEditForm(int &state, File & file, String filename, char *buffer, size_
       while (file.available()) {
         int cnt = readLine(file, buffer + i, maxlen - i - 1);
         i += cnt;
+        if (i + 2 > maxlen) break; // no room for '\n'+NUL; readLine already terminated buffer
         buffer[i++] = '\n';
         buffer[i] = 0;
         if (i + 256 > maxlen) break; // max line length in file 256 chars
@@ -1217,7 +1659,11 @@ const char *handleEditPost(AsyncWebServerRequest * request) {
 // will be removed. its now in data/upd.html (for GET; POST to update.html still handled here)
 const char *createUpdateForm(boolean run) {
   char *ptr = message;
-  strcpy(ptr, "<!DOCTYPE html><html><head><link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"></head><body><form action=\"update.html\" method=\"post\">");
+  sprintf(ptr, "<!DOCTYPE html><html><head>"
+               "<meta name=\"color-scheme\" content=\"light dark\">"
+               "<script src=\"theme.js?v=%s\"></script>"
+               "<link rel=\"stylesheet\" type=\"text/css\" href=\"style.css?v=%s\"></head>"
+               "<body><form action=\"update.html\" method=\"post\">", version_id, version_id);
   if (run) {
     strcat(ptr, "<p>Doing update, wait until reboot</p>");
   } else {
@@ -1241,11 +1687,21 @@ const char *handleUpdatePost(AsyncWebServerRequest * request) {
     Serial.println(param.c_str());
     if (param.equals("dev2")) {
       Serial.println("equals devel");
+      updateHost = updateHostOfficial;
+      updatePort = 80;
       updatePrefix = updatePrefixD;
     }
     else if (param.equals("main")) {
       Serial.println("equals main");
+      updateHost = updateHostOfficial;
+      updatePort = 80;
       updatePrefix = updatePrefixM;
+    }
+    else if (param.equals("py5ol")) {
+      Serial.println("equals py5ol");
+      updateHost = updateHostPy5ol;
+      updatePort = 80;
+      updatePrefix = updatePrefixP;
     }
     else if (localUpdates && param.equals("local")) {
       // Local updates permitted. Expect URL as url parameter...
@@ -1337,8 +1793,6 @@ const char *sendGPX(AsyncWebServerRequest * request) {
     return "ERROR";
   }
   SondeInfo *si = &sonde.sondeList[index];
-  strcpy(si->d.id, "test");
-  si->d.lat = 48; si->d.lon = 11; si->d.alt = 500;
   snprintf(ptr, 10240, "<?xml version='1.0' encoding='UTF-8'?>\n"
            "<gpx version=\"1.1\" creator=\"http://rdzsonde.local\" xmlns=\"http://www.topografix.com/GPX/1/1\" "
            "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
@@ -1356,21 +1810,45 @@ const char *sendGPX(AsyncWebServerRequest * request) {
 bool isAuthenticated(AsyncWebServerRequest *request, int level) {
   if(defaultUserLevel >= level)
     return 1;
-  if(request->hasHeader("Cookie")) {
-    String cookieHdr = request->getHeader("Cookie")->value();
-    int start = cookieHdr.indexOf("SESSION=") + strlen("SESSION=");
-    if(start!=-1) {
-      int end = cookieHdr.indexOf(';', start);
-      String session = (end==-1) ? cookieHdr.substring(start) : cookieHdr.substring(start, end);
-      session.trim();
-      int ulvl = getCookieAuthLevel(session.c_str());
-      if(ulvl >= level) {
-        return 1;
-      }
+  char session[COOKIE_SIZE];
+  getSessionCookie(request, session, COOKIE_SIZE);
+  if(session[0]) {
+    int ulvl = getCookieAuthLevel(session);
+    if(ulvl >= level) {
+      return 1;
     }
   }
-  request->send(401, "text/plain", "Permission denied");
+  // Not authenticated: send the user to the login page instead of a bare 401 text response.
+  // Remember where they were headed as ?next= so login.html can return them there afterwards.
+  // request->url() is the URL-decoded path only (query already stripped). Only carry simple,
+  // safe local paths; login.html validates again, and anything unusual falls back to /index.html.
+  AsyncWebServerResponse *response = request->beginResponse(302);
+  String loc = "/login.html";
+  String url = request->url();
+  bool safe = url.length() > 1 && url[0] == '/' && url != "/login.html";
+  for(unsigned int i = 0; safe && i < url.length(); i++) {
+    char c = url[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '/' || c == '.' || c == '-' || c == '_';
+    if(!ok) safe = false;
+  }
+  if(safe) loc += "?next=" + url;
+  response->addHeader("Location", loc);
+  request->send(response);
   return false;
+}
+
+// Effective access level for a request: the larger of the open default level and the
+// session level (same rule isAuthenticated/whoami use). Used to render UI per access level.
+int reqAuthLevel(AsyncWebServerRequest *request) {
+  int level = defaultUserLevel;
+  char session[COOKIE_SIZE];
+  getSessionCookie(request, session, COOKIE_SIZE);
+  if(session[0]) {
+    int slvl = getCookieAuthLevel(session);
+    if(slvl > level) level = slvl;
+  }
+  return level;
 }
 
 const char* PARAM_MESSAGE = "message";
@@ -1398,6 +1876,82 @@ static bool deleteSdDirRecursive(const char *sdPath, const char *vfsPath) {
 }
 #endif
 
+// Unpack a filesystem-update archive (the format produced by scripts/makefsupdate.py)
+// from a stream into LittleFS. The archive repeats a "<filename> <size>\n" header line
+// followed by <size> raw bytes; each entry is written to /<filename>. Works on any
+// Stream -- the pull OTA passes the WiFiClient, the web upload passes a buffered File.
+// Returns the number of files written, or -1 on a malformed header.
+int unpackFsArchive(Stream &in) {
+  int count = 0;
+  while (in.available()) {
+    char fn[128];
+    fn[0] = '/';
+    size_t fnlen = in.readBytesUntil('\n', fn + 1, sizeof(fn) - 2);
+    fn[1 + fnlen] = 0;   // readBytesUntil does not terminate; also keeps the write in bounds
+    char *sz = strchr(fn, ' ');
+    if (!sz) return -1;
+    *sz = 0;
+    int len = atoi(sz + 1);
+    LOG_I(TAG, "Updating file %s (%d bytes)\n", fn, len);
+    File f = LittleFS.open(fn, FILE_WRITE);
+    while (len > 0) {
+      unsigned char buf[1024];
+      size_t r = in.readBytes((char *)buf, len > 1024 ? 1024 : len);
+      if (r == 0) break;   // timeout / end of stream -- stop this entry
+      if (f) f.write(buf, r);
+      len -= r;
+    }
+    if (f) f.close();
+    count++;
+  }
+  return count;
+}
+
+// --- Web file-upload OTA (POST /uploadota) -------------------------------------------
+// Deferred reboot: a millis() deadline set by the upload completion handler; loop()
+// restarts once it passes, so the HTTP response is delivered before the reboot.
+unsigned long otaRebootAt = 0;
+// State for the single in-flight /uploadota request. A request may carry the firmware
+// bin and/or the filesystem archive; each file part is routed by its leading byte.
+static bool otaUpInProgress = false, otaUpErr = false, otaUpFw = false, otaUpFs = false;
+static int  otaUpTarget = 0;          // current part: 1=firmware (U_FLASH), 2=filesystem temp file
+static File otaUpFsFile;
+#define OTA_FS_TMP "/_otafs.bin"
+
+// Per-chunk upload callback. ESP32 app images begin with 0xE9; anything else is treated
+// as a filesystem archive (buffered to a temp file, unpacked in the completion handler).
+void handleOtaUpload(AsyncWebServerRequest *request, const String &filename, size_t index,
+                     uint8_t *data, size_t len, bool final) {
+  if (index == 0 && !otaUpInProgress) {   // first part of the request -> reset state
+    otaUpInProgress = true; otaUpErr = false; otaUpFw = false; otaUpFs = false;
+  }
+  if (index == 0) {
+    // Silent auth + feature gate (must not write firmware for unauthorized requests).
+    if (reqAuthLevel(request) < 2 || !sonde.config.allowfileupload) { otaUpErr = true; otaUpTarget = 0; return; }
+    if (len > 0 && data[0] == 0xE9) {
+      otaUpTarget = 1; otaUpFw = true;
+      LOG_I(TAG, "OTA upload: firmware '%s'\n", filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) { Update.printError(Serial); otaUpErr = true; otaUpTarget = 0; }
+    } else {
+      otaUpTarget = 2; otaUpFs = true;
+      LOG_I(TAG, "OTA upload: filesystem '%s'\n", filename.c_str());
+      otaUpFsFile = LittleFS.open(OTA_FS_TMP, "w");
+      if (!otaUpFsFile) { otaUpErr = true; otaUpTarget = 0; }
+    }
+  }
+  if (otaUpErr) return;
+  if (otaUpTarget == 1) {
+    if (Update.write(data, len) != len) { Update.printError(Serial); otaUpErr = true; }
+  } else if (otaUpTarget == 2) {
+    if (otaUpFsFile) otaUpFsFile.write(data, len);
+  }
+  if (final) {
+    if (otaUpTarget == 1) { if (!Update.end(true)) { Update.printError(Serial); otaUpErr = true; } }
+    else if (otaUpTarget == 2) { if (otaUpFsFile) otaUpFsFile.close(); }
+    otaUpTarget = 0;
+  }
+}
+
 void SetupAsyncServer() {
   Serial.println("SetupAsyncServer()\n");
   for(int i=0; i<7; i++) { bootid[i]=random(26)+'A'; }
@@ -1414,17 +1968,19 @@ void SetupAsyncServer() {
   });
 
   server.on("/qrg.json", HTTP_GET,  [](AsyncWebServerRequest * request) {
+    if(!isAuthenticated(request, 1)) return;
     request->send(200, "text/html", getQRGAsJson());
   });
 
   server.on("/qrg.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
-    request->send(200, "text/html", createQRGForm());
+    if(!isAuthenticated(request, 1)) return;
+    request->send(200, "text/html", createQRGForm(reqAuthLevel(request)));
   });
- 
+
   server.on("/qrg.html", HTTP_POST, [](AsyncWebServerRequest * request) {
     if(!isAuthenticated(request, 2)) return;
     handleQRGPost(request);
-    request->send(200, "text/html", createQRGForm());
+    request->send(200, "text/html", createQRGForm(2));
   });
 
   server.on("/wifi.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
@@ -1439,14 +1995,14 @@ void SetupAsyncServer() {
   });
 
   server.on("/config.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
-    if(!isAuthenticated(request, 2)) return;
-    request->send(200, "text/html", createConfigForm());
+    if(!isAuthenticated(request, 1)) return;   // level 1 may view config; saving (POST) needs level 2
+    request->send(200, "text/html", createConfigForm(reqAuthLevel(request)));
   });
-  
+
   server.on("/config.html", HTTP_POST, [](AsyncWebServerRequest * request) {
     if(!isAuthenticated(request, 2)) return;
     handleConfigPost(request);
-    request->send(200, "text/html", createConfigForm());
+    request->send(200, "text/html", createConfigForm(2));
   });
 
   server.on("/status.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
@@ -1455,6 +2011,9 @@ void SetupAsyncServer() {
   server.on("/live.json", HTTP_GET,  [](AsyncWebServerRequest * request) {
     request->send(200, "text/json", createLiveJson());
   });
+  server.on("/spectrum.json", HTTP_GET,  [](AsyncWebServerRequest * request) {
+    request->send(200, "text/json", createSpectrumJson());
+  });
   server.on("/livemap.html", HTTP_GET, [](AsyncWebServerRequest * request) {
     request->send(LittleFS, "/livemap.html", String(), false, processor);
   });
@@ -1462,21 +2021,24 @@ void SetupAsyncServer() {
     request->send(LittleFS, "/livemap.js", String(), false, processor);
   });
   server.on("/update.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
+    if(!isAuthenticated(request, 2)) return;   // firmware update is an admin action
     request->send(200, "text/html", createUpdateForm(0));
   });
   server.on("/update.html", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if(!isAuthenticated(request, 2)) return;
     handleUpdatePost(request);
     request->send(200, "text/html", createUpdateForm(1));
   });
 
   server.on("/control.html", HTTP_GET,  [](AsyncWebServerRequest * request) {
-    if(!isAuthenticated(request, 2)) return;
-    request->send(200, "text/html", createControlForm());
+    if(!isAuthenticated(request, 1)) return;   // level 1 may view and use the control tab
+    request->send(200, "text/html", createControlForm(reqAuthLevel(request), false));
   });
   server.on("/control.html", HTTP_POST, [](AsyncWebServerRequest * request) {
-    if(!isAuthenticated(request, 2)) return;
-    handleControlPost(request);
-    request->send(200, "text/html", createControlForm());
+    if(!isAuthenticated(request, 1)) return;   // control actions (rx/scan/spectrum/...) allowed at level 1
+    int lvl = reqAuthLevel(request);
+    bool screenChanged = handleControlPost(request, lvl);
+    request->send(200, "text/html", createControlForm(lvl, screenChanged));
   });
 
   server.on("/login.html", HTTP_GET, [](AsyncWebServerRequest * request) {
@@ -1484,6 +2046,48 @@ void SetupAsyncServer() {
   });
   server.on("/login.html", HTTP_POST, [](AsyncWebServerRequest * request) {
     handleLoginPost(request);
+  });
+  server.on("/logout", HTTP_GET, [](AsyncWebServerRequest * request) {
+    handleLogout(request);
+  });
+
+  server.on("/sdfiles.html", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send(LittleFS, "/sdfiles.html", String(), false, processor);
+  });
+
+  server.on("/users.html", HTTP_GET, [](AsyncWebServerRequest * request) {
+    if(!isUserMgmtAllowed(request)) return;
+    request->send(LittleFS, "/users.html", String(), false, processor);
+  });
+  server.on("/users.json", HTTP_GET, [](AsyncWebServerRequest * request) {
+    if(!isUserMgmtAllowed(request)) return;
+    getUserListJson(message, sizeof(message));
+    request->send(200, "application/json", message);
+  });
+  server.on("/users.html", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if(!isUserMgmtAllowed(request)) return;
+    handleUsersPost(request);
+  });
+  // Effective access level for the current request (max of the open default level and the
+  // session level -- same rule as isAuthenticated). Used by index.html to hide nav tabs the
+  // user cannot access. Purely cosmetic: every route still enforces auth server-side.
+  server.on("/whoami.json", HTTP_GET, [](AsyncWebServerRequest * request) {
+    char session[COOKIE_SIZE];
+    getSessionCookie(request, session, COOKIE_SIZE);
+    int level = defaultUserLevel;
+    if(session[0]) {
+      int slvl = getCookieAuthLevel(session);
+      if(slvl > level) level = slvl;
+    }
+    char user[USERLEN+1] = "";
+    if(session[0]) {
+      int i = 0;
+      for(; i < USERLEN && session[i] && session[i] != ':'; i++) user[i] = session[i];
+      user[i] = 0;
+    }
+    char buf[64];
+    snprintf(buf, sizeof(buf), "{\"user\":\"%s\",\"level\":%d}", user, level);
+    request->send(200, "application/json", buf);
   });
 
   server.on("/file", HTTP_GET,  [](AsyncWebServerRequest * request) {
@@ -1506,6 +2110,7 @@ void SetupAsyncServer() {
   //server.on("/sd/files.json", HTTP_GET, [](AsyncWebServerRequest *request) {  } ); /// TODO: fix later, temporarily keep for bkward compat
 
   server.on("/files.json", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if(!isAuthenticated(request, 2)) return;
 #define FILES_JSON_MAX_SIZE 4096
 #define FILES_JSON_MAX_ENTRY 128
     String subdir;
@@ -1696,8 +2301,37 @@ void SetupAsyncServer() {
   });
 
   server.on("/upd.html", HTTP_GET, [](AsyncWebServerRequest * request) {
+    if(!isAuthenticated(request, 2)) return;   // update check/trigger page is admin-only
     request->send(LittleFS, "/upd.html", String(), false, processor);
   });
+
+  // Current boot nonce; the update page polls this to detect when the device has
+  // finished flashing and rebooted (the bootid changes on each boot). Unauthenticated
+  // on purpose: it carries no secret and must stay reachable across the reboot.
+  server.on("/bootid", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send(200, "text/plain", bootid);
+  });
+
+  // Upload firmware (update.ino.bin) and/or filesystem (update.fs.bin) directly from the
+  // browser. Gated by the hidden allowfileupload config option; admin-only. handleOtaUpload
+  // streams the parts; this completion handler unpacks any filesystem archive and reboots.
+  server.on("/uploadota", HTTP_POST, [](AsyncWebServerRequest * request) {
+    if(!isAuthenticated(request, 2)) return;   // admin-only (sends login redirect if not)
+    bool enabled = sonde.config.allowfileupload;
+    bool ok = enabled && otaUpInProgress && !otaUpErr && (otaUpFw || otaUpFs);
+    if (ok && otaUpFs) {                        // unpack the buffered filesystem archive
+      File f = LittleFS.open(OTA_FS_TMP, "r");
+      if (!f || unpackFsArchive(f) < 0) ok = false;
+      if (f) f.close();
+    }
+    if (otaUpFs) LittleFS.remove(OTA_FS_TMP);
+    otaUpInProgress = false;
+    const char *msg = !enabled ? "File upload is disabled (set allowfileupload=1)."
+                    : ok       ? "Update applied. Rebooting..."
+                               : "Update failed. See the serial log.";
+    request->send(enabled ? (ok ? 200 : 500) : 403, "text/plain", msg);
+    if (ok) otaRebootAt = millis() + 1500;      // reboot after the response is delivered
+  }, handleOtaUpload);
 
   server.on("/status.json", HTTP_GET, [](AsyncWebServerRequest * request) {
    int nr = 0;
@@ -1717,6 +2351,17 @@ void SetupAsyncServer() {
       request->send(200);
     } else {
       String url = request->url();
+      // Never serve credential files to unauthenticated clients (this static fallback
+      // would otherwise expose user.txt / networks.txt / config.txt by direct URL).
+      if (isSensitiveFile(url.c_str())) {
+        if(!isAuthenticated(request, 2)) return;
+      }
+      // Any other non-asset file (config/data such as qrg.txt, screens*.txt, gpsinit.txt,
+      // GPSRESET) is private: require at least a logged-in (level 1) session before serving
+      // it by direct URL. Public web assets (css/js/html/images/...) stay open.
+      else if (!isPublicStaticAsset(url)) {
+        if(!isAuthenticated(request, 1)) return;
+      }
       if (url.endsWith(".gpx"))
         request->send(200, "application/gpx+xml", sendGPX(request));
       else {
@@ -1752,9 +2397,6 @@ int fetchWifiIndex(const char *id) {
       return i;
     }
     //LOG_D(TAG, "No match: '%s' vs '%s'\n", id, networks[i].id.c_str());
-    const char *cfgid = networks[i].id.c_str();
-    int len = strlen(cfgid);
-    if (strlen(id) > len) len = strlen(id);
   }
   return -1;
 }
@@ -1854,6 +2496,35 @@ const char *getStateStr(int what) {
     return mainStateStr[what];
 }
 
+// Web scan plot: when idle (no sonde locked) and the configured interval has
+// elapsed, run one data-only spectrum sweep, then restore decode tuning.
+static unsigned long lastScanPlotMillis = 0;
+// A watcher is considered present if /spectrum.json was polled within this
+// window. Must exceed the page's poll interval (POLL_MS=3000 in scanplot.html)
+// with margin so a single missed/slow poll doesn't drop the watcher.
+static const unsigned long SCANPLOT_WATCH_MS = 10000;
+static void maybeScanPlotSweep() {
+  if (sonde.config.scanplotint <= 0) return;          // feature disabled
+  SondeInfo *si = &sonde.sondeList[sonde.currentSonde];
+  if (si->lastState == 1) return;                     // locked onto a sonde -> never sweep
+  unsigned long now = millis();
+  // Only sweep while a browser is actually viewing the scan plot (it polls
+  // /spectrum.json every few seconds). With nobody watching, skip the sweep
+  // entirely so the radio stays fully available to the sonde search.
+  if (lastSpectrumPollMs == 0 || (now - lastSpectrumPollMs) > SCANPLOT_WATCH_MS) return;
+  // A watcher is present. If no scan exists in memory yet (seq still 0), sweep
+  // immediately so the page gets a plot without waiting; otherwise throttle to
+  // the configured interval.
+  if (scanner.webSeq() != 0) {
+    unsigned long interval = (unsigned long)sonde.config.scanplotint * 1000UL;
+    if ((now - lastScanPlotMillis) < interval) return;
+  }
+  lastScanPlotMillis = now;
+  LOG_I(TAG, "ScanPlot: idle sweep\n");
+  scanner.scanForWeb();                               // data-only sweep, bumps seq
+  sonde.setup();                                      // restore radio tuning for current sonde
+}
+
 void sx1278Task(void *parameter) {
   /* new strategy:
       background tasks handles all interactions with sx1278.
@@ -1883,6 +2554,7 @@ void sx1278Task(void *parameter) {
       continue;
     }
     sonde.receive();
+    maybeScanPlotSweep();
     delay(20);
   }
 }
@@ -2184,8 +2856,17 @@ void setup()
     return;
   }
 
+  // If the device has no password key yet (fresh device, or NVS was erased), any existing
+  // /user.txt cannot be valid against it (it was plaintext from old firmware, or hashed
+  // with a key that's gone). Wipe it so the admin re-bootstraps user accounts.
+  if (!deviceKeysExist()) {
+    Serial.println("No device key present: clearing /user.txt for fresh user setup");
+    LittleFS.remove("/user.txt");
+  }
+
   Serial.println("Reading initial configuration");
   setupConfigData();    // configuration must be read first due to OLED ports!!!
+  frameCache.begin(sonde.config.cachesize);
   WiFi.setHostname(sonde.config.mdnsname);
   //WiFi.enableIPv6();
 
@@ -2328,6 +3009,15 @@ void setup()
   //sx1278.setLNAGain(-48);
   sx1278.setLNAGain(0);
 
+  // Optionally enable LnaBoostHf (RegLna 0x0C bits 1-0 = 0b11 -> 150% LNA current).
+  // AGC (enabled for some sonde types) only controls the LnaGain field (bits 7-5),
+  // it leaves these boost bits untouched, so setting it once here is sufficient.
+  // Mainly useful when no external LNA is present (config option "lnaboost").
+  if (sonde.config.lnaboost) {
+    uint8_t lna = sx1278.readRegister(REG_LNA);
+    sx1278.writeRegister(REG_LNA, lna | 0x03);
+  }
+
   int gain = sx1278.getLNAGain();
   Serial.print("RX LNA Gain is ");
   Serial.println(gain);
@@ -2366,6 +3056,9 @@ void setup()
 #if FEATURE_SDCARD
   connSDCard.init();
 #endif
+#if FEATURE_SERIALOUT
+  connSerialOut.init();
+#endif
 
   enableLocalUpdates();   // check if local updates from other servers is allowed
 
@@ -2386,8 +3079,14 @@ void setup()
 #endif
 }
 
-void enterMode(int mode) {
+void enterMode(int mode, bool force) {
   LOG_D(TAG, "enterMode(%d)\n", mode);
+  // Auto-scan: when enabled, "start decoding" means "start searching the spectrum
+  // for peaks". force=true bypasses this and is used by the auto-scan loop itself
+  // to lock onto a found sonde.
+  if (mode == ST_DECODER && !force && autoscanActive()) {
+    mode = ST_AUTOSCAN;
+  }
   // Backround RX task should only be active in mode ST_DECODER for now
   // (future changes might use RX background task for spectrum display as well)
   if (mode != ST_DECODER) {
@@ -2403,6 +3102,11 @@ void enterMode(int mode) {
     disp.rdis->setFont(FONT_SMALL);
     specTimer = millis();
     //scanner.init();
+  } else if (mainState == ST_AUTOSCAN) {
+    Serial.println("Entering ST_AUTOSCAN mode");
+    sonde.clearDisplay();
+    disp.rdis->setFont(FONT_SMALL);
+    autoscanReset();
   } else if (mainState == ST_WIFISCAN || mainState == ST_RINEX_UPDATE || mainState == ST_FORMAT_SD) {
     sonde.clearDisplay();
   }
@@ -2441,9 +3145,60 @@ static const char *action2text(uint8_t action) {
 static char rdzData[RDZ_DATA_LEN];
 static int rdzDataPos = 0;
 
+#define REPLAY_PACE 4            // max backlog frames delivered per connector per tick
+#define MAX_REPLAY_AGE 1800      // seconds; skip buffered frames older than 30 min on replay
+
+// Deliver frames to each ready connector, advancing its cursor.
+// `live`/`liveSeq` are the just-pushed live frame this tick (live==NULL if none):
+// a connector caught up to it receives the REAL SondeInfo (full fidelity: extra/
+// launchsite/rxStat), while a connector that is behind replays the cached copy
+// (which carries only type/freq/afc/rssi/rxtime/d) until it catches up. idleTick()
+// runs only when nothing was delivered, so SondeHub's batching/flush is preserved.
+// Non-network connectors inherit replayReady()==false and are skipped.
+void drainConnectors(SondeInfo *live, uint32_t liveSeq) {
+  if (!frameCache.enabled()) return;
+  uint32_t now = (uint32_t) time(NULL);
+  // Value-initialize: frameCache.get() only fills type/freq/afc/rssi/rxtime/d, so
+  // launchsite/rxStat/extra must start zeroed (empty launchsite, rxStat[0]=0,
+  // extra=NULL) rather than leak stack garbage into replayed payloads.
+  SondeInfo tmp = {};
+  for (int i = 0; connectors[i]; i++) {
+    Conn *c = connectors[i];
+    if (c->replayCursor < frameCache.oldestSeq()) c->replayCursor = frameCache.oldestSeq();
+    int delivered = 0;
+    while (delivered < REPLAY_PACE && c->replayReady() && c->replayCursor < frameCache.headSeq()) {
+      if (live && c->replayCursor == liveSeq) {
+        c->updateSonde(live);         // caught up to the live frame: full fidelity, always fresh
+      } else {
+        if (!frameCache.get(c->replayCursor, &tmp)) { c->replayCursor++; continue; }
+        // Age cap, guarded against a backward clock step (rxtime > now => treat as fresh).
+        uint32_t age = (now >= tmp.rxtime) ? (now - tmp.rxtime) : 0;
+        if (age > MAX_REPLAY_AGE) { c->replayCursor++; continue; }
+        c->updateSonde(&tmp);
+      }
+      c->replayCursor++;
+      delivered++;
+    }
+    if (delivered == 0) c->idleTick();
+  }
+}
+
 void loopDecoder() {
+  // Auto-scan mode: hold the peak-detected sonde while it keeps decoding; return
+  // to sweeping only after norx_timeout seconds with no valid frame (same knob the
+  // normal decoder uses for "no signal -> scan"). Tracked via the last good frame
+  // so the decoder's own timeout/cycling can't trigger an early exit.
+  if (autoscanActive() && sonde.config.norx_timeout > 0 &&
+      (millis() - autoLockGoodMs) > (unsigned long)sonde.config.norx_timeout * 1000UL) {
+    LOG_I(TAG, "AutoScan: no data for %ds, returning to scan\n", sonde.config.norx_timeout);
+    enterMode(ST_AUTOSCAN);
+    return;
+  }
   // sonde knows the current type and frequency, and delegates to the right decoder
   uint16_t res = sonde.waitRXcomplete();
+  // Refresh the auto-scan no-signal timer on a good frame from the locked sonde.
+  if (autoscanActive() && (res & 0xff) == 0 && rxtask.receiveSonde == autoscanSlot())
+    autoLockGoodMs = millis();
   int action;
   //LOG_D(TAG, "waitRX result is %x\n", (int)res);
   action = (int)(res >> 8);
@@ -2506,7 +3261,7 @@ void loopDecoder() {
     while (rdzclient.available()) {
       char c = (char)rdzclient.read();
       Serial.print(c);
-      if (c == '\n' || c == '}' || rdzDataPos >= RDZ_DATA_LEN) {
+      if (c == '\n' || c == '}' || rdzDataPos >= RDZ_DATA_LEN - 1) {
         // parse GPS position from phone
         rdzData[rdzDataPos] = c;
         if (rdzDataPos > 2) parseGpsJson(rdzData, rdzDataPos + 1);
@@ -2521,11 +3276,36 @@ void loopDecoder() {
 
   // wifi active and good packet received => send packet
   SondeInfo *s = &sonde.sondeList[rxtask.receiveSonde];
-  if ((res & 0xff) == 0 && connected) {
-    //Send a packet with position information
-    // first check if ID and position lat+lonis ok
+  bool goodFrame = ((res & 0xff) == 0);
+  bool goodPos = s->d.validID && ((s->d.validPos & 0x03) == 0x03);
+  if (goodFrame) s->rxtime = (uint32_t) time(NULL);   // receipt time; set even if !connected so buffered-during-outage frames replay with correct age/time_received
 
-    if (s->d.validID && ((s->d.validPos & 0x03) == 0x03)) {
+#if FEATURE_SERIALOUT
+  if (goodFrame && goodPos) connSerialOut.updateSonde(s);
+#endif
+
+  if (frameCache.enabled()) {
+    // Cache path: buffer frames worth uploading (valid id+position); network
+    // connectors are fed via drainConnectors() (live frame full-fidelity when
+    // caught up, cached copies for backfill). Local sinks are written live.
+    SondeInfo *live = NULL;
+    uint32_t liveSeq = 0;
+    if (goodFrame && goodPos) {
+      liveSeq = frameCache.push(s);   // buffered even if !connected, to cover WiFi outages too
+      live = s;
+    }
+#if FEATURE_SDCARD
+    if (goodFrame && connected) connSDCard.updateSonde(s);
+#endif
+#if FEATURE_NOTIFY
+    // Live-only sink, like the SD card above: the alerts are about the sonde in front of you
+    // now, so they must not queue behind a backfill.
+    if (goodFrame && goodPos && connected) connNotify.updateSonde(s);
+#endif
+    drainConnectors(live, liveSeq);
+  } else if ((res & 0xff) == 0 && connected) {
+    // Direct dispatch, used when the cache is disabled.
+    if (goodPos) {
 #if FEATURE_APRS
       connAPRS.updateSonde(s);
 #endif
@@ -2533,13 +3313,15 @@ void loopDecoder() {
       connChasemapper.updateSonde( s );
 #endif
 #if FEATURE_SONDESEEKER
-  connSondeseeker.updateSonde( s );
+      connSondeseeker.updateSonde( s );
+#endif
+#if FEATURE_NOTIFY
+      connNotify.updateSonde( s );
 #endif
     }
 #if FEATURE_SONDEHUB
     connSondehub.updateSonde( s );   // invoke sh_send_data....
 #endif
-
 #if FEATURE_MQTT
     connMQTT.updateSonde( s );      // send to MQTT if enabled
 #endif
@@ -2564,6 +3346,9 @@ void loopDecoder() {
 #endif
 #if FEATURE_SDCARD
   connSDCard.updateStation( NULL );
+#endif
+#if FEATURE_SERIALOUT
+  connSerialOut.updateStation( NULL );
 #endif
   // always send data, even if not valid....
   if (rdzclient.connected()) {
@@ -2681,6 +3466,264 @@ void startSpectrumDisplay() {
   enterMode(ST_SPECTRUM);
 }
 
+// ---------------- Auto-scan (peak detection) ----------------
+// Active when autoscan_enable is set. Runs entirely in the main
+// loop like loopSpectrum(): the RX background task is idle (mainState != ST_DECODER)
+// so the main loop owns the radio. Each pass sweeps the spectrum, trial-decodes
+// every peak through the enabled sonde types, and on a valid frame hands off to
+// the normal decoder via enterMode(ST_DECODER, true). Modeled on radiosonde_auto_rx.
+static const SondeType AUTOSCAN_TYPES[] = {
+  STYPE_RS41, STYPE_DFM, STYPE_M10M20, STYPE_MP3H,
+#if FEATURE_RS92
+  STYPE_RS92,
+#endif
+};
+#define AUTOSCAN_NTYPES ((int)(sizeof(AUTOSCAN_TYPES) / sizeof(AUTOSCAN_TYPES[0])))
+
+// AS_QRG: try the active channel-list QRGs (configured freq+type) first, then the
+// spectrum sweep + per-peak trial. AS_QRG is only entered when autoscan_qrgfirst is set.
+enum { AS_QRG, AS_SWEEP, AS_TRIAL };
+static int asState = AS_SWEEP;
+static ScanPeak asPeaks[AUTOSCAN_MAXPK];
+static int asNpeaks = 0;
+static int asPeakIdx = 0;
+static int asTypeIdx = 0;
+static bool asTrialSetup = false;
+static unsigned long asTrialStart = 0;
+static unsigned long asNextSweep = 0;
+static int asQrgIdx = 0;              // index into the channel list during AS_QRG
+static bool asQrgSetup = false;       // radio tuned to the current QRG this cycle?
+static unsigned long asQrgStart = 0;  // millis() the current QRG trial began
+
+// QRG-first is active only when enabled AND there is at least one channel to try.
+static inline bool autoscanQrgFirst() {
+  return sonde.config.autoscan_qrgfirst != 0 && sonde.nSonde > 0;
+}
+
+// True if freqHz is within tolerance of any frequency (MHz) listed in the
+// comma-separated autoscan_exclude config -- known local birdies/noise to skip
+// during peak detection. Tolerance is half the peak-quantization step (so entering
+// the frequency shown in the peak list matches), floored at 1 kHz.
+static bool autoscanExcluded(double freqHz) {
+  const char *s = sonde.config.autoscan_exclude;
+  if (!s || !*s) return false;
+  long tol = sonde.config.autoscan_quant > 0 ? sonde.config.autoscan_quant / 2 : 5000;
+  if (tol < 1000) tol = 1000;
+  while (*s) {
+    while (*s == ' ' || *s == ',') s++;   // skip separators
+    if (!*s) break;
+    double fMHz = atof(s);
+    if (fMHz > 0) {
+      double d = freqHz - fMHz * 1e6;
+      if (d < 0) d = -d;
+      if (d <= (double)tol) return true;
+    }
+    while (*s && *s != ',') s++;           // advance to next token
+  }
+  return false;
+}
+
+static void autoscanReset() {
+  asState = autoscanQrgFirst() ? AS_QRG : AS_SWEEP;
+  asNpeaks = 0;
+  asPeakIdx = asTypeIdx = 0;
+  asTrialSetup = false;
+  asNextSweep = 0;
+  asQrgIdx = 0;
+  asQrgSetup = false;
+  autoscanWebState = 0;
+  autoscanWebTryType = -1;
+  autoscanWebNpeaks = 0;
+  autoscanWebPeakN = 0;
+  sonde.dispsavectlON();                             // start with the display on
+}
+
+void loopAutoScan() {
+  // Auto-scan turned off at runtime (config change) -> resume normal decoding.
+  if (!autoscanActive()) { setCurrentDisplay(1); enterMode(ST_DECODER); return; }
+  // Buttons: let the user escape to the WiFi/config screen or manual spectrum.
+  int key = getKeyPress();
+  if (key != KP_NONE) sonde.dispsavectlON();         // any key wakes the display
+  switch (key) {
+    case KP_LONG: enterMode(ST_WIFISCAN); return;
+    case KP_DOUBLE: enterMode(ST_SPECTRUM); return;
+    default: break;
+  }
+  // Screen saver: scanning counts as "no RX", so the display dims/clears after the
+  // configured timeout just like in decoder mode (called ~1x per pass, ~1-2 s).
+  sonde.dispsavectlOFF(0);
+  bool dispOn = (disp.dispstate != 0);
+
+  if (asState == AS_QRG) {
+    // QRG-first: before sweeping for peaks, walk the active channel-list entries and
+    // try each on its own configured frequency+type. This catches known sondes whose
+    // signal is too weak to stand out as a spectrum peak. One channel per loop pass.
+    if (asNextSweep && (long)(millis() - asNextSweep) < 0) { delay(100); return; }  // brief pause between empty cycles
+    while (asQrgIdx < sonde.nSonde && !sonde.sondeList[asQrgIdx].active) asQrgIdx++;  // skip inactive channels
+    if (asQrgIdx >= sonde.nSonde) {                  // whole list tried, nothing locked -> sweep for peaks
+      asState = AS_SWEEP;
+      asNextSweep = 0;
+      asQrgIdx = 0; asQrgSetup = false;
+      autoscanWebState = 0;
+      return;
+    }
+
+    // Give each QRG the same budget one sonde type gets in the peak trial.
+    unsigned long perQrg = (sonde.config.autoscan_typedwell > 0)
+        ? (unsigned long)sonde.config.autoscan_typedwell
+        : (unsigned long)sonde.config.autoscan_dwell * 1000UL / AUTOSCAN_NTYPES;
+    if (perQrg < 1000UL) perQrg = 1000UL;
+
+    if (!asQrgSetup) {
+      SondeInfo *ch = &sonde.sondeList[asQrgIdx];
+      double fMHz = ch->freq;
+      int slot = autoscanSlot();                     // reuse the scratch slot, like the peak trial,
+      SondeInfo *si = &sonde.sondeList[slot];         // so the ST_DECODER handoff / autoLockGoodMs logic works
+      si->type = ch->type;
+      si->freq = fMHz;
+      si->active = 1;
+      rxtask.currentSonde = slot;
+      sonde.currentSonde = slot;
+      sonde.setup();
+      asQrgStart = millis();
+      asQrgSetup = true;
+      autoscanWebState = 2;                           // 2 = QRG phase (0=sweep, 1=peak trial)
+      autoscanWebTryFreq = fMHz;
+      autoscanWebTryType = ch->type;
+      LOG_I(TAG, "AutoScan: QRG %.3f MHz as %s\n", fMHz, sondeTypeStr[ch->type]);
+      if (dispOn) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "QRG %.3f %s", fMHz, sondeTypeStr[ch->type]);
+        disp.rdis->drawString(0, 0, buf);
+      }
+    }
+
+    uint16_t res = sonde.rxRawFrame();               // ~1 frame window; blocks here
+    if (res == RX_OK) {
+      SondeInfo *si = &sonde.sondeList[autoscanSlot()];
+      LOG_I(TAG, "AutoScan: LOCK (QRG) %.3f MHz as %s\n", si->freq, sondeTypeStr[si->type]);
+      autoLockGoodMs = millis();                      // start the no-signal timer fresh
+      sonde.dispsavectlON();
+      setCurrentDisplay(1);
+      enterMode(ST_DECODER, true);                    // hand off to the normal decoder
+      return;
+    }
+
+    if ((long)(millis() - asQrgStart) >= (long)perQrg) {  // no frame in budget -> next active channel
+      asQrgIdx++;
+      asQrgSetup = false;
+    }
+    return;
+  }
+
+  if (asState == AS_SWEEP) {
+    // Optional brief pause after a fruitless sweep so we don't spin uselessly.
+    if (asNextSweep && (long)(millis() - asNextSweep) < 0) { delay(100); return; }
+    scanner.scanForWeb();                            // sweep + bump web seq
+    if (scanner.webSeq() && dispOn) scanner.plotResult();  // show spectrum (unless saver off)
+    int maxpk = sonde.config.autoscan_maxpeaks;
+    if (maxpk > AUTOSCAN_MAXPK) maxpk = AUTOSCAN_MAXPK;
+    asNpeaks = scanner.findPeaks(asPeaks, maxpk, sonde.config.autoscan_snr,
+                                 sonde.config.autoscan_mindist, sonde.config.autoscan_quant);
+    // Drop peaks on configured known-noise frequencies (autoscan_exclude) so we don't
+    // waste dwell trial-decoding a local birdie/spur. QRG channels are not filtered.
+    {
+      int kept = 0;
+      for (int i = 0; i < asNpeaks; i++) {
+        if (autoscanExcluded(asPeaks[i].freqHz)) {
+          LOG_I(TAG, "AutoScan: excluding peak %.3f MHz (autoscan_exclude)\n", asPeaks[i].freqHz * 1e-6);
+          continue;
+        }
+        if (kept != i) asPeaks[kept] = asPeaks[i];
+        kept++;
+      }
+      asNpeaks = kept;
+    }
+    // Publish peak list to the web scan-plot.
+    int pn = asNpeaks; if (pn > AUTOSCAN_MAXPK) pn = AUTOSCAN_MAXPK;
+    for (int i = 0; i < pn; i++) autoscanWebPeakF[i] = asPeaks[i].freqHz * 1e-6;
+    autoscanWebPeakN = pn;
+    autoscanWebNpeaks = asNpeaks;
+    LOG_I(TAG, "AutoScan: sweep found %d peaks\n", asNpeaks);
+    if (asNpeaks == 0) {
+      autoscanWebState = 0;
+      if (autoscanQrgFirst()) {                        // re-check the QRG list next cycle
+        asState = AS_QRG; asQrgIdx = 0; asQrgSetup = false;
+      }
+      asNextSweep = millis() + 1000UL;                 // brief delay before the next cycle
+      return;
+    }
+    asPeakIdx = 0; asTypeIdx = 0; asTrialSetup = false;
+    asState = AS_TRIAL;
+    autoscanWebState = 1;
+    return;
+  }
+
+  // AS_TRIAL: walk peaks (strongest first), trying each enabled type per peak.
+  if (asPeakIdx >= asNpeaks) {
+    if (autoscanQrgFirst()) {                         // start the next cycle with the QRG list
+      asState = AS_QRG; asQrgIdx = 0; asQrgSetup = false;
+      asNextSweep = 0;
+    } else {
+      asState = AS_SWEEP;
+      asNextSweep = millis();                         // re-sweep immediately
+    }
+    autoscanWebState = 0;
+    return;
+  }
+
+  // Per-type dwell: a fixed time per sonde type (autoscan_typedwell, ms) if set,
+  // otherwise auto_rx's per-peak budget (autoscan_dwell, s) split across the
+  // enabled types. Floored at ~one frame period so a present sonde can be caught.
+  unsigned long perType = (sonde.config.autoscan_typedwell > 0)
+      ? (unsigned long)sonde.config.autoscan_typedwell
+      : (unsigned long)sonde.config.autoscan_dwell * 1000UL / AUTOSCAN_NTYPES;
+  if (perType < 1000UL) perType = 1000UL;
+
+  if (!asTrialSetup) {
+    SondeType t = AUTOSCAN_TYPES[asTypeIdx];
+    double fMHz = asPeaks[asPeakIdx].freqHz * 1e-6;
+    int slot = autoscanSlot();                       // scratch slot past the channel list
+    SondeInfo *si = &sonde.sondeList[slot];
+    si->type = t;
+    si->freq = fMHz;
+    si->active = 1;
+    rxtask.currentSonde = slot;
+    sonde.currentSonde = slot;
+    sonde.setup();
+    asTrialStart = millis();
+    asTrialSetup = true;
+    autoscanWebTryFreq = fMHz;
+    autoscanWebTryType = t;
+    LOG_I(TAG, "AutoScan: trial %.3f MHz as %s\n", fMHz, sondeTypeStr[t]);
+    if (dispOn) {
+      char buf[40];
+      snprintf(buf, sizeof(buf), "Scan %.3f %s", fMHz, sondeTypeStr[t]);
+      disp.rdis->drawString(0, 0, buf);
+    }
+  }
+
+  uint16_t res = sonde.rxRawFrame();                 // ~1 frame window; blocks here
+  if (res == RX_OK) {
+    SondeInfo *si = &sonde.sondeList[autoscanSlot()];
+    LOG_I(TAG, "AutoScan: LOCK %.3f MHz as %s\n", si->freq, sondeTypeStr[si->type]);
+    autoLockGoodMs = millis();                       // start the no-signal timer fresh
+    sonde.dispsavectlON();                           // wake the display for the locked sonde
+    setCurrentDisplay(1);                            // default sonde display
+    enterMode(ST_DECODER, true);                     // hand off to the normal decoder
+    return;
+  }
+
+  if ((long)(millis() - asTrialStart) >= (long)perType) {
+    asTypeIdx++;
+    asTrialSetup = false;
+    if (asTypeIdx >= AUTOSCAN_NTYPES) {              // exhausted types -> next peak
+      asTypeIdx = 0;
+      asPeakIdx++;
+    }
+  }
+}
+
 const char *translateEncryptionType(wifi_auth_mode_t encryptionType) {
   switch (encryptionType) {
     case (WIFI_AUTH_OPEN):
@@ -2703,7 +3746,7 @@ const char *translateEncryptionType(wifi_auth_mode_t encryptionType) {
 // in core.h
 //enum t_wifi_state { WIFI_DISABLED, WIFI_SCAN, WIFI_CONNECT, WIFI_CONNECT_GOT_DISCONNECT, WIFI_CONNECTED, WIFI_APMODE };
 
-t_wifi_state wifi_state = WIFI_DISABLED;
+volatile t_wifi_state wifi_state = WIFI_DISABLED;
 
 uint32_t netup_time;
 
@@ -2788,6 +3831,13 @@ void WiFiEvent(WiFiEvent_t event)
 	break;
       }
       LOG_D(TAG, "Turning off (state is %d)\n", wifi_state);
+      // Only actually power the radio down when WiFi is configured off (mode 0).
+      // For every other mode we want to stay reachable -- either reconnect as a
+      // station or keep the AP up (incl. the mode-5 AP+STA fallback) -- so leave
+      // the radio on and let loopWifiBackground() drive recovery. Powering off
+      // here would kill the radio whenever an established station link drops,
+      // leaving no way to reconnect.
+      if (sonde.config.wifi != 0) break;
       WiFi.mode(WIFI_MODE_NULL);
       break;
     case ARDUINO_EVENT_WIFI_OFF:
@@ -2868,6 +3918,15 @@ void WiFiEvent(WiFiEvent_t event)
 }
 
 
+// Time budget for a single station (re)connect attempt. This is a wall-clock
+// deadline rather than a loop-iteration count: loopWifiBackground() is paced by
+// the RX loop (waitRXcomplete), whose cadence varies with sonde type/signal, so
+// a fixed iteration count would give an unpredictable timeout. Armed at every WiFi.begin
+// (wifiConnect/wifiConnectDirect/loopWifiScan) so the background loop always has a
+// valid deadline for a connect attempt handed off to it.
+#define WIFI_CONNECT_TIMEOUT_MS 20000UL
+static unsigned long wifi_connect_deadline;
+
 void wifiConnect(int16_t res) {
   LOG_I(TAG, "WiFi scan result: found %d networks\n", res);
 
@@ -2899,6 +3958,7 @@ void wifiConnect(int16_t res) {
       fetchWifiSSID(bestEntry), fetchWifiPw(bestEntry), bestChannel, bestRSSI);
     wifi_state = WIFI_CONNECT;
     WiFi.begin(fetchWifiSSID(bestEntry), fetchWifiPw(bestEntry), bestChannel, bestBSSID);
+    wifi_connect_deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
   } else {
     // rescan
     // wifiStart();
@@ -2908,24 +3968,54 @@ void wifiConnect(int16_t res) {
 }
 
 void wifiConnectDirect(int16_t index) {
+  // Mode 4 uses networks[1] (index 0 is the fallback AP's identity). If that slot
+  // isn't configured, WiFi.begin("","") would silently connect to nothing; bail
+  // with a clear log instead so the misconfiguration is visible.
+  if (index < 0 || index >= nNetworks || strlen(fetchWifiSSID(index)) == 0) {
+    LOG_E(TAG, "WiFi mode 4 (direct): network slot %d not configured (nNetworks=%d) -- check networks.txt\n", index, nNetworks);
+    return;
+  }
   Serial.println("AP mode 4: trying direct reconnect");
   wifi_state = WIFI_CONNECT;
   WiFi.begin(fetchWifiSSID(index), fetchWifiPw(index));
+  wifi_connect_deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
 }
 
-static int wifi_cto;
+// Mode 5: after this many failed background scan/connect cycles, give up on a
+// pure-station reconnect and re-raise the AP (AP+STA) so the device stays
+// reachable while it keeps retrying the configured network in the background.
+#define WIFI_MODE5_AP_FALLBACK 3
+static int wifi_reconnect_fails;
+
+// Mode 5 (config.wifi==5) AP fallback: keep the AP up but retry the configured
+// station network in the background (AP+STA). On success the AP is dropped.
+#define AP_STA_RETRY_MS   120000UL   // gap between background station retry attempts
+#define AP_STA_CONNECT_MS  15000UL   // time allowed for each background connect attempt
+static unsigned long apsta_next_retry = 0;
+static unsigned long apsta_connect_deadline = 0;
+static int apsta_phase = 0;          // 0=waiting, 1=scanning, 2=connecting
 
 void loopWifiBackground() {
   LOG_D(TAG, "WifiBackground: state %d\n", wifi_state);
   // handle Wifi station mode in background
   if (sonde.config.wifi == 0 || sonde.config.wifi == 2) return; // nothing to do if disabled or access point mode
 
-  if (wifi_state == WIFI_DISABLED) {  // stopped => start can
+  if (wifi_state == WIFI_DISABLED) {  // stopped => start scan/connect
     if (sonde.config.wifi == 4) {  // direct connect to first network, supports hidden SSID
-       wifiConnectDirect(1);
-       wifi_cto = 0;
+       wifiConnectDirect(1);       // arms wifi_connect_deadline
+    } else if (sonde.config.wifi == 5 && wifi_reconnect_fails >= WIFI_MODE5_AP_FALLBACK) {
+      // Mode 5: could not restore the station link after several cycles. Bring the
+      // AP back (AP+STA) so the device stays reachable while the apsta background
+      // logic keeps retrying the configured network. (At boot loopWifiScan() does
+      // this fallback; without it a runtime loss loops as pure STA forever and the
+      // device becomes unreachable when the configured network is gone for good.)
+      Serial.println("WiFi mode 5: reconnect failed repeatedly -- re-raising AP");
+      wifi_reconnect_fails = 0;
+      startAP();
+      enableNetwork(true);
     } else {
       Serial.println("WiFi start scan");
+      if (sonde.config.wifi == 5) wifi_reconnect_fails++;
       wifi_state = WIFI_SCAN;
       WiFi.scanNetworks(true); // scan in async mode
     }
@@ -2942,13 +4032,12 @@ void loopWifiBackground() {
       return;
     }
     // Scan finished, try to connect
-    wifiConnect(res);
-    wifi_cto = 0;
+    wifiConnect(res);             // arms wifi_connect_deadline on success
   } else if (wifi_state == WIFI_CONNECT) {
-    wifi_cto++;
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("Wifi is connected\n");
       wifi_state = WIFI_CONNECTED;
+      wifi_reconnect_fails = 0;   // reconnect succeeded; reset the AP-fallback counter
       // update IP in display
       String localIPstr = WiFi.localIP().toString();
       LOG_I(TAG, "IP is %s\n", localIPstr.c_str());
@@ -2956,9 +4045,20 @@ void loopWifiBackground() {
       sonde.updateDisplayIP();
       enableNetwork(true);
     }
-    if (wifi_cto > 20) { // failed, restart scanning
+    else if ((long)(millis() - wifi_connect_deadline) >= 0) { // timed out, restart scanning
       wifi_state = WIFI_DISABLED;
       WiFi.disconnect(true);
+    }
+  } else if (wifi_state == WIFI_CONNECT_GOT_DISCONNECT) {
+    // A disconnect event arrived while a background connect attempt was in progress
+    // (loopWifiScan() retries this inline; the background loop needs its own case,
+    // otherwise a dropped/failed reconnect stays parked here and never recovers).
+    // Either the link came back on its own, or we fall back to a fresh scan/connect cycle.
+    if (WiFi.status() == WL_CONNECTED) {
+      wifi_state = WIFI_CONNECT;   // came back; let WIFI_CONNECT finish the handshake
+    } else {
+      WiFi.disconnect(true);
+      wifi_state = WIFI_DISABLED;  // restart scan -> connect
     }
   } else if (wifi_state == WIFI_CONNECTED) {
     //LOG_D(TAG, "status: %d\n", ((WiFiSTAClass)WiFi).status());
@@ -2970,12 +4070,73 @@ void loopWifiBackground() {
       enableNetwork(false);
       WiFi.disconnect(true);
     } //else Serial.println("WiFi still connected");
+  } else if (wifi_state == WIFI_APMODE) {
+    // Mode 5 AP fallback: periodically retry the configured station network in the
+    // background (AP+STA) without dropping the AP; once connected, drop the AP.
+    if (sonde.config.wifi != 5) return;   // only mode 5 retries; other AP modes stay put
+    unsigned long now = millis();
+    if (apsta_phase == 0) {                       // waiting for the next retry window
+      if ((long)(now - apsta_next_retry) < 0) return;
+      Serial.println("AP+STA: background station retry -- scanning");
+      WiFi.scanNetworks(true);                    // async scan, AP stays up
+      apsta_phase = 1;
+    } else if (apsta_phase == 1) {                // scan in progress
+      int16_t res = WiFi.scanComplete();
+      if (res == WIFI_SCAN_RUNNING) return;
+      apsta_phase = 0;
+      apsta_next_retry = now + AP_STA_RETRY_MS;    // schedule next window regardless
+      if (res <= 0) { WiFi.scanDelete(); return; } // failed/empty scan, try again later
+      // pick the strongest configured network that is in range
+      int bestEntry = -1; int bestRSSI = INT_MIN; int32_t bestChannel = 0;
+      uint8_t bestBSSID[6];
+      for (int i = 0; i < res; i++) {
+        String ssid; int32_t rssi; uint8_t sec; uint8_t *bssid; int32_t chan;
+        WiFi.getNetworkInfo(i, ssid, sec, rssi, bssid, chan);
+        int idx = fetchWifiIndex(ssid.c_str());
+        if (idx < 0 || rssi <= bestRSSI) continue;
+        bestEntry = idx; bestRSSI = rssi; bestChannel = chan;
+        memcpy(bestBSSID, bssid, sizeof(bestBSSID));
+      }
+      WiFi.scanDelete();
+      if (bestEntry < 0) return;                   // configured network not in range
+      LOG_I(TAG, "AP+STA: connecting to %s in background\n", fetchWifiSSID(bestEntry));
+      WiFi.begin(fetchWifiSSID(bestEntry), fetchWifiPw(bestEntry), bestChannel, bestBSSID);
+      apsta_phase = 2;
+      apsta_connect_deadline = now + AP_STA_CONNECT_MS;
+    } else if (apsta_phase == 2) {                // connect attempt in progress
+      if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("AP+STA: station connected -- dropping AP");
+        WiFi.softAPdisconnect(true);              // drop the AP, keep the station link
+        WiFi.mode(WIFI_STA);
+        String localIPstr = WiFi.localIP().toString();
+        LOG_I(TAG, "IP is %s\n", localIPstr.c_str());
+        sonde.setIP(localIPstr.c_str(), false);
+        sonde.updateDisplayIP();
+        wifi_state = WIFI_CONNECTED;
+        enableNetwork(true);                       // rebind services to the station IP
+        apsta_phase = 0;
+      } else if ((long)(now - apsta_connect_deadline) >= 0) {
+        Serial.println("AP+STA: station retry timed out -- staying in AP mode");
+        WiFi.disconnect(false);                    // abort the STA attempt, keep the AP
+        apsta_phase = 0;
+        apsta_next_retry = now + AP_STA_RETRY_MS;
+      }
+    }
   }
 }
 
 void startAP() {
   Serial.println("Activating access point mode");
   wifi_state = WIFI_APMODE;
+  // Mode 5 keeps the station radio enabled (AP+STA) so it can retry the configured
+  // network in the background without dropping the AP; other modes run the AP alone.
+  if (sonde.config.wifi == 5) {
+    WiFi.mode(WIFI_AP_STA);
+    apsta_phase = 0;
+    apsta_next_retry = millis() + AP_STA_RETRY_MS;
+  } else {
+    WiFi.mode(WIFI_AP);
+  }
   WiFi.softAP(networks[0].id.c_str(), networks[0].pw.c_str());
 
   Serial.println("Wait 100 ms for AP_START...");
@@ -3032,6 +4193,7 @@ void loopTouchCalib() {
 // 2: access point mode (wait for clients in background)
 // 3: traditional sync. WifiScan. Tries to connect to a network, in case of failure activates AP.
 // 4: Station mode/hidden AP: same as 1, but instead of scan, just call espressif method to connect (will connect to hidden AP as well
+// 5: like 3, but keeps the AP up and retries the station connection in the background (AP+STA); drops the AP once the station connects
 #define MAXWIFIDELAY 40
 static const char* _scan[2] = {"/", "\\"};
 void loopWifiScan() {
@@ -3060,14 +4222,22 @@ void loopWifiScan() {
   case 4:  // direct connect without scan, only first item in network list
     // Mode STN/DIRECT[4]: Connect directly (supports hidden AP)
     {
-      disp.rdis->drawString(0, 0, "WiFi Connect...");
-      disp.rdis->drawString(0, dispys * 2, fetchWifiSSID(1));
-      wifiConnectDirect(1);
+      if (nNetworks < 2 || strlen(fetchWifiSSID(1)) == 0) {
+        // No station network configured for direct connect: fall back to AP so
+        // the user can reach the web UI and fix networks.txt.
+        LOG_E(TAG, "WiFi mode 4 (direct): no station network configured -- falling back to AP\n");
+        abort = 1;
+      } else {
+        disp.rdis->drawString(0, 0, "WiFi Connect...");
+        disp.rdis->drawString(0, dispys * 2, fetchWifiSSID(1));
+        wifiConnectDirect(1);
+      }
     }
     break;
   case 1:  // STATION mode (continue in BG if no connection)
   case 3:  // old AUTO mode (change to AP if no connection)
-    // Mode STATION[1] or SETUP[3]: Scan for networks;
+  case 5:  // like AUTO, but the AP stays up and the station is retried in background (AP+STA)
+    // Mode STATION[1] or SETUP[3] or AP+retry[5]: Scan for networks;
     disp.rdis->drawString(0, 0, "WiFi Scan...");
     int line = 0;
     WiFi.mode(WIFI_STA);
@@ -3094,6 +4264,9 @@ void loopWifiScan() {
       // TODO: wifi_state is used inconsistently
       wifi_state = WIFI_CONNECT;
       WiFi.begin(fetchWifiSSID(net_index), fetchWifiPw(net_index));
+      // Arm the timeout in case this attempt is still pending when loopWifiScan()
+      // hands off to loopWifiBackground() (mode 1 continues connecting in the BG).
+      wifi_connect_deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;
     } else {
       abort = 2;  // no network found in scan => abort right away
     }
@@ -3113,6 +4286,7 @@ void loopWifiScan() {
         if(abort) break;
         WiFi.begin(fetchWifiSSID(connectIndex), fetchWifiPw(connectIndex));
         wifi_state = WIFI_CONNECT;
+        wifi_connect_deadline = millis() + WIFI_CONNECT_TIMEOUT_MS;  // arm for a possible BG handoff
       }
     }
     Serial.print(".");
@@ -3147,7 +4321,7 @@ void loopWifiScan() {
     enableNetwork(true);
     delay(3000);
   }
-  else if(sonde.config.wifi == 3 || abort==1 ) {
+  else if(sonde.config.wifi == 3 || sonde.config.wifi == 5 || abort==1 ) {
     WiFi.disconnect(true);
     delay(1000);
     startAP();
@@ -3225,6 +4399,7 @@ void execOTA() {
   if (!client.connect(updateHost, updatePort)) {
     LOG_E(TAG, "Connection to %s:%d for fs update failed\n", updateHost, updatePort);
     enterMode(ST_DECODER);
+    return;
   }
 
   // First, try update file system
@@ -3241,39 +4416,13 @@ void execOTA() {
   if (res < 0) {
     ; // no-op
   } else {
-    // process data...
-    while (client.available()) {
-      // get header...
-      char fn[128];
-      fn[0] = '/';
-      client.readBytesUntil('\n', fn + 1, 128);
-      char *sz = strchr(fn, ' ');
-      if (!sz) {
-        client.stop();
-        enterMode(ST_DECODER);
-        return;
-      }
-      *sz = 0;
-      int len = atoi(sz + 1);
-      LOG_I(TAG, "Updating file %s (%d bytes)\n", fn, len);
-      char fnstr[17];
-      memset(fnstr, ' ', 16);
-      strncpy(fnstr, fn, 16);
-      fnstr[16] = 0;
-      disp.rdis->drawString(0, 2 * dispys, fnstr);
-      File f = LittleFS.open(fn, FILE_WRITE);
-      // read sz bytes........
-      while (len > 0) {
-        unsigned char buf[1024];
-        int r = client.read(buf, len > 1024 ? 1024 : len);
-        if (r == -1) {
-          client.stop();
-          enterMode(ST_DECODER);
-          return;
-        }
-        f.write(buf, r);
-        len -= r;
-      }
+    // Unpack the filesystem archive directly from the network stream (shared with the
+    // web file-upload path, see unpackFsArchive).
+    disp.rdis->drawString(0, 2 * dispys, "Updating files");
+    if (unpackFsArchive(client) < 0) {
+      client.stop();
+      enterMode(ST_DECODER);
+      return;
     }
     client.stop();
   }
@@ -3443,6 +4592,9 @@ void loop() {
 
   Log.handleImprov();
 
+  // Deferred reboot requested by the web file-upload OTA (after its response was sent).
+  if (otaRebootAt && millis() > otaRebootAt) { Serial.println("Rebooting after file upload"); ESP.restart(); }
+
 #ifndef REMOVE_ALL_FOR_TESTING
   switch (mainState) {
     case ST_DECODER:
@@ -3453,6 +4605,7 @@ void loop() {
 #endif
       break;
     case ST_SPECTRUM: loopSpectrum(); break;
+    case ST_AUTOSCAN: loopAutoScan(); break;
     case ST_WIFISCAN: loopWifiScan(); break;
     case ST_UPDATE: execOTA(); break;
     case ST_TOUCHCALIB: loopTouchCalib(); break;

@@ -204,15 +204,18 @@ void geteph() {
 	disp.rdis->drawString(0,4*dispys,"Decompressing...");
 	// decompression
 	tinfl_decompressor *decomp = (tinfl_decompressor *)malloc(sizeof(tinfl_decompressor));
+	if(!decomp) { Serial.println("geteph: out of memory for decompressor"); return; }
 	tinfl_init(decomp);
 	File file = LittleFS.open("/brdc.gz","r");
-	if(!file) {	
+	if(!file) {
 		Serial.println("cannot open file\n");
+		free(decomp);
 		return;
 	}
 	File ofile = LittleFS.open("/brdc", "w");
 	if(!ofile) {
 		Serial.println("cannot open file /brdc for writing");
+		free(decomp);
 		return;
 	}
 	file.readBytes(buf, 10);  // skip gzip header
@@ -223,13 +226,13 @@ void geteph() {
 	if(flags&0x08) { // skip file name extra header
 		do {
 			int res=file.readBytes(buf, 1);
-			if(res!=1) return;
+			if(res!=1) { free(decomp); return; }
 		} while(*buf);
 	}
 	if(flags&0x10) { // skip file name extra header
 		do {
 			int res=file.readBytes(buf, 1);
-			if(res!=1) return;
+			if(res!=1) { free(decomp); return; }
 		} while(*buf);
 	}
 	int opos = 0;
@@ -237,6 +240,11 @@ void geteph() {
 	Serial.println("Decompressing ephemeris data...\n");
 	char *obuf =(char *)malloc(32768);
 	char *ibuf =(char *)malloc(8192);
+	if(!obuf || !ibuf) {
+		Serial.println("geteph: out of memory for decompression buffers");
+		free(obuf); free(ibuf); free(decomp);
+		return;
+	}
 	while(file.available()) {
 		size_t len = file.readBytes(ibuf, 8192);
 		size_t inofs = 0;

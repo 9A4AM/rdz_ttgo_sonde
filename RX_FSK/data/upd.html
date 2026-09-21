@@ -1,62 +1,416 @@
-<html><head>
-<link rel="stylesheet" type="text/css" href="style.css">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>rdzTTGOSonde Update</title>
+  <meta charset="UTF-8">
+  <meta name="color-scheme" content="light dark">
+  <script src="theme.js?v=%VERSION_ID%"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" type="text/css" href="style.css?v=%VERSION_ID%">
+  <script src="dialog.js?v=%VERSION_ID%"></script>
+  <style>
+    /* Update page: keep the table and each method section in one centered column. */
+    .upd-version { max-width: 640px; margin: 18px auto; }
+    .upd-version td:first-child { font-weight: bold; width: 12em; }
+    .upd-section { margin: 22px auto; max-width: 640px; }
+    .upd-section h2 { font-size: 18px; margin: 0 0 8px; }
+    .upd-note { color: var(--text-muted); font-size: 13px; line-height: 1.5; }
+    .upd-url { padding: 6px 8px; box-sizing: border-box; max-width: 30em; }
+    /* Server-select radios. The shared ".system-info input:focus" rule (style.css)
+       adds a green box-shadow meant for text fields, which looks wrong on a radio;
+       reset it here and give the brand accent + a normal keyboard focus outline. */
+    #server-select label { cursor: pointer; }
+    #server-select input[type="radio"] { accent-color: var(--brand); box-shadow: none; vertical-align: middle; }
+    #server-select input[type="radio"]:focus { box-shadow: none; outline: none; }
+    #server-select input[type="radio"]:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+    /* Per-branch update status shown under the version in its table row. */
+    .upd-status { display: block; font-size: 13px; margin-top: 3px; }
+    .upd-ok    { color: var(--brand-text); }   /* up to date (green) */
+    .upd-avail { color: var(--accent-info); }   /* update available (blue) */
+    .upd-info  { color: var(--text-muted); }
+    .upd-warn  { color: var(--danger-text); }
+    .updbtn {
+      background-color: var(--brand); color: var(--on-brand); border: none; border-radius: 5px;
+      padding: 9px 22px; font-size: 14px; cursor: pointer; margin: 4px 6px 4px 0;
+      transition: background-color .3s ease;
+    }
+    .updbtn:hover { background-color: var(--brand-hover); }
+    .updbtn:active { transform: translateY(1px); }
+    .updbtn:disabled { background-color: var(--brand-disabled); cursor: not-allowed; }
+    /* Update-from-file: styled rows with a custom file button (the native control is
+       unstyled and locale-dependent). */
+    .filerow { display: flex; align-items: center; justify-content: space-between;
+               gap: 14px; padding: 12px 2px; border-bottom: 1px solid var(--border-hairline); }
+    .filerow:first-of-type { border-top: 1px solid var(--border-hairline); }
+    .fileinfo { display: flex; flex-direction: column; line-height: 1.35; }
+    .upd-hint { color: var(--text-faint); font-size: 12px; }
+    .filepick { display: flex; align-items: center; gap: 10px; cursor: pointer; min-width: 0; }
+    .filebtn { background: var(--bg-alt); border: 1px solid var(--border-input); border-radius: 5px;
+               padding: 6px 14px; font-size: 13px; color: var(--text); white-space: nowrap; }
+    .filepick:hover .filebtn { background: var(--border-soft); }
+    /* Fixed-width name column so every .filepick is the same width and the "Choose file"
+       buttons line up across rows (the button sits left of this variable-length name). */
+    .filename { font-size: 13px; color: var(--text-faint); overflow-wrap: anywhere; flex: 0 0 12em; }
+    .filepick.has-file .filename { color: var(--text); }
+    .filepick.bad-name .filename { color: var(--danger-text); }   /* name differs from the expected one */
+    .updbtn[type="submit"] { margin-top: 14px; }
+  </style>
 </head>
 <body>
+<div class="wrapper">
+  <div class="header"><div id="myTopnav" class="topnav">
+    <a href="/index.html" class="tablinks">Home</a>
+    <a class="tablinks active">Update</a>
+  </div>
+  <div id="themeToggle" class="themetoggle-mount"></div>
+  </div>
+  <div class="tabcontent" style="display: flex;">
+    <div class="system-info">
+      <h1>Firmware &amp; Filesystem Update</h1>
 
+      <!-- Installed vs. available versions; each available row also shows whether an
+           online update to it is allowed (set by checkVersion()). -->
+      <table class="status-table upd-version">
+        <tr><td>Currently installed</td><td>%FULLNAMEID%</td></tr>
+        <tr id="rowMain"><td>Available (main)</td><td>
+          <span id="verMain">(&hellip;checking&hellip;)</span>
+          <span id="stMain" class="upd-status"></span></td></tr>
+        <tr id="rowDev2"><td>Available (dev2)</td><td>
+          <span id="verDev2">(&hellip;checking&hellip;)</span>
+          <span id="stDev2" class="upd-status"></span></td></tr>
+        <tr id="rowPy5ol"><td>Available (PY5OL)</td><td>
+          <span id="verPy5ol">(&hellip;checking&hellip;)</span>
+          <span id="stPy5ol" class="upd-status"></span></td></tr>
+      </table>
 
-<form action="update.html" method="post"><p>Currently installed: %FULLNAMEID%</p>
-<p>
-Available main: <span id="masterDiv">(...checking...)</span>
+      <!-- Update server selector. Chooses which host the device downloads from; the
+           choice is remembered in localStorage (applyServer). Official uses the built-in
+           rdzsonde.org main/dev2 branches; PY5OL uses rdzttgo.nano.dev.br (single build).
+           The download host itself is set in firmware (handleUpdatePost) by the button name. -->
+      <div class="upd-section" id="server-select">
+        <h2>Update server</h2>
+        <label><input type="radio" name="updserver" value="official" checked>
+          Official (rdzsonde.org)</label>
+        &nbsp;&nbsp;
+        <label><input type="radio" name="updserver" value="py5ol">
+          PY5OL (rdzttgo.nano.dev.br)</label>
+      </div>
 
-<br>
-Available dev2: <span id="develDiv">(...checking...)</span>
+      <!-- Online update (official): pulls from rdzsonde.org over the device's WiFi. Each
+           button is enabled/disabled by checkVersion() based on the suffix comparison. -->
+      <form class="upd-section" id="online-official" action="update.html" method="post">
+        <h2>Online update</h2>
+        <p class="upd-note">Requires the device to have Internet access via WiFi.</p>
+        <input class="updbtn" id="btnMain" type="submit" name="main" value="Update from Main">
+        <input class="updbtn" id="btnDev2" type="submit" name="dev2" value="Update from Dev2">
+      </form>
 
-</p>
-<input type="submit" name="main" value="Main-Update"></input><br>
-<input type="submit" name="dev2" value="Dev-Update"><br>
-<div id="local-update-section">
-  <input type="submit" name="local" value="Local-Update"> from
-  <input type="text" name="url" value="%LOCAL_UPDATES%" size="64"><br>
+      <!-- Online update (PY5OL): single flat build served from rdzttgo.nano.dev.br. -->
+      <form class="upd-section" id="online-py5ol" action="update.html" method="post">
+        <h2>Online update</h2>
+        <p class="upd-note">Downloads from rdzttgo.nano.dev.br over the device's WiFi.</p>
+        <input class="updbtn" id="btnPy5ol" type="submit" name="py5ol" value="Update from PY5OL">
+      </form>
+
+      <!-- Local update from a URL (developer feature; hidden unless enabled) -->
+      <form class="upd-section" id="local-update-section" action="update.html" method="post">
+        <h2>Local update from URL</h2>
+        <p class="upd-note" id="local-update-info">Developer feature: a server path
+          containing <tt>update.ino.bin</tt> and <tt>update.fs.bin</tt>.</p>
+        <!-- The Local-Update button must precede the URL field: the firmware only honors
+             the "url" parameter once it has already seen "local" in submission order. -->
+        <input class="updbtn" type="submit" name="local" value="Update from URL"> from
+        <input class="upd-url" type="text" name="url" value="%LOCAL_UPDATES%" size="48">
+      </form>
+
+      <!-- Update from local files (hidden unless allowfileupload is enabled in config).
+           Select the firmware and/or filesystem image; one button uploads all chosen.
+           The firmware auto-detects each file by content, so the slot is just a hint. -->
+      <form class="upd-section" id="file-update-section" action="/uploadota" method="post"
+            enctype="multipart/form-data">
+        <h2>Update from file</h2>
+        <p class="upd-note">Upload a firmware and/or filesystem image built locally
+          (<tt>make ota</tt>). Choose either or both, then apply.</p>
+        <div class="filerow">
+          <div class="fileinfo"><b>Firmware (app)</b><span class="upd-hint">expects update.ino.bin</span></div>
+          <label class="filepick">
+            <input type="file" name="firmware" accept=".bin" data-expect="update.ino.bin" hidden>
+            <span class="filebtn">Choose file</span><span class="filename">No file chosen</span>
+          </label>
+        </div>
+        <div class="filerow">
+          <div class="fileinfo"><b>Filesystem (web UI)</b><span class="upd-hint">expects update.fs.bin</span></div>
+          <label class="filepick">
+            <input type="file" name="filesystem" accept=".bin" data-expect="update.fs.bin" hidden>
+            <span class="filebtn">Choose file</span><span class="filename">No file chosen</span>
+          </label>
+        </div>
+        <input class="updbtn" type="submit" value="Upload &amp; apply">
+      </form>
+
+      <div class="upd-section">
+        <p class="upd-note">
+          If the version suffix <b>letter</b> differs, a full re-flash over USB is
+          mandatory and the update will not work. If only the <b>number</b> differs,
+          the update includes filesystem changes but is safe to apply. If the suffix
+          is identical, the update applies fully.
+        </p>
+      </div>
+    </div>
+    <div class="footer"><span></span><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
+  </div>
 </div>
-</form>
-
-<p>Note: If suffix is the same, update should work fully. If the number is
-different, update contains changes in the file system. A full re-flash is
-required to get all new features, but the update should not break anything.
-If the letter is different, a full re-flash is mandatory, update will not
-work.</p>
-<p id="local-update-info">
-The local-update feature is for developers and requires a path containing
-<tt>update.fs.bin</tt> and <tt>update.ino.bin</tt>.
-</p>
 
 <script>
 const localEnabled = "%LOCAL_UPDATES%";
+const fileUploadEnabled = "%ALLOWFILEUPLOAD%";   // "1" enables the Update-from-file section
+const installed = "%FULLNAMEID%".trim();   // e.g. teste20260616-C3
+const initialBootID = "%BOOTID%";          // changes when the device reboots after updating
+// PCT holds the percent sign, built at runtime so no literal percent character appears
+// in this file. It is served through the firmware token template engine, which would
+// mis-parse a stray percent as a token delimiter and corrupt the script.
+const PCT = String.fromCharCode(37);
 
 document.addEventListener("DOMContentLoaded", () => {
+  // The local-update-from-URL section is a developer feature; hide it unless a
+  // local update server has been configured (localupd.txt -> %LOCAL_UPDATES%).
   if (localEnabled.trim() === "") {
-    // Hide the local update section
-    const localUpdateSection = document.getElementById("local-update-section");
-    const localUpdateInfo = document.getElementById("local-update-info");
-    if (localUpdateSection) localUpdateSection.style.display = "none";
-    if (localUpdateInfo) localUpdateInfo.style.display = "none";
+    const sec = document.getElementById("local-update-section");
+    if (sec) sec.style.display = "none";
   }
 });
 
-const masterInfo = document.getElementById('masterDiv');
-const develInfo = document.getElementById('develDiv');
+// On a real device the page is served from the device's IP and pulls version info
+// from the selected update server. Under the local preview server (localhost, or its
+// :8099 port) the same paths are mocked, so fetch them same-origin.
+const isPreview = location.hostname === "localhost" ||
+                  location.hostname === "127.0.0.1" || location.port === "8099";
+// Base URL for the browser's version check, per selected server. This is only the
+// UI version fetch — the device itself downloads the firmware over http (no TLS),
+// see handleUpdatePost/execOTA. The PY5OL server redirects http->https for
+// everything except the .bin files, and a redirect response carries no CORS header,
+// so fetch its update-info.html over https directly (the browser can do TLS; going
+// from an http page to https is allowed, unlike the reverse).
+function hostFor(server) {
+  if (isPreview) return "";
+  return server === "py5ol" ? "https://rdzttgo.nano.dev.br" : "http://rdzsonde.org";
+}
+const SERVER_KEY = "rdzUpdateServer";   // localStorage key remembering the last choice
 
-let request = new XMLHttpRequest();
-request.open('GET', 'http://rdzsonde.org/main/update-info.html');
-request.onload = function() {
-  masterInfo.innerHTML = request.response.replace(/<[^>]*>/g, '');
+// Version strings look like <version_id>-<Letter><Number> (Letter=filesystem major,
+// Number=filesystem minor). The suffix is the final '-' token.
+function suffixOf(id) {
+  let tok = (id || "").trim().split("-").pop();
+  let m = /^([A-Za-z]+)(\d+)$/.exec(tok);
+  return m ? { letter: m[1].toUpperCase(), number: parseInt(m[2], 10), raw: tok } : null;
 }
-request.send();
-let drequest = new XMLHttpRequest();
-drequest.open('GET', 'http://rdzsonde.org/dev2/update-info.html');
-drequest.onload = function() {
-  develInfo.innerHTML= drequest.response.replace(/<[^>]*>/g, '');;
+const insSuf = suffixOf(installed);
+
+// Fork origin of a version string. The PY5OL fork bakes a fixed "py5ol-" prefix into
+// version_id (scripts/ota_version.py); upstream builds (e.g. "dev20260405") don't.
+// Anything without that prefix is treated as the Official fork.
+function forkOf(id) {
+  return /^py5ol/i.test((id || "").trim()) ? "PY5OL" : "Official";
 }
-drequest.send();
+const installedFork = forkOf(installed);
+// Which fork each online update button installs. Local-URL/file uploads supply a
+// user-chosen image and are intentionally absent here (no cross-fork gate).
+const BUTTON_FORK = { main: "Official", dev2: "Official", py5ol: "PY5OL" };
+
+// Two independent questions:
+//  1) Freshness: is a new version available? Compare the FULL version string
+//     (version_id + suffix), NOT just the filesystem suffix -- otherwise two
+//     different builds sharing the same FS version look "up to date".
+//  2) Compatibility (only relevant once a new version exists), from the suffix:
+//     Letter differs -> FS layout incompatible, USB re-flash required (block).
+//     Number differs -> FS content changed but safe to apply online (allow).
+//     Same suffix    -> applies fully (allow).
+// Unknown/unparseable available version -> allow (can't validate).
+function classify(avail) {
+  avail = (avail || "").trim();
+  let av = suffixOf(avail);
+  if (!insSuf || !av) return { ok: true, level: "upd-info", msg: "" };
+  if (avail === installed)
+    return { ok: true, level: "upd-ok", msg: "✓ Up to date" };
+  // A different version is available -- qualify how it can be applied.
+  if (av.letter !== insSuf.letter)
+    return { ok: false, level: "upd-warn", msg: "✗ Update available — incompatible filesystem (" +
+             insSuf.letter + "→" + av.letter + "), USB re-flash required" };
+  if (av.number !== insSuf.number)
+    return { ok: true, level: "upd-avail", msg: "↑ Update available — filesystem changes (" +
+             insSuf.raw + "→" + av.raw + "), safe to apply online" };
+  return { ok: true, level: "upd-avail", msg: "↑ Update available — applies fully" };
+}
+
+// Fetch an "available version" string from a full URL, show it, set its status, and
+// gate its button. Used for both the official main/dev2 branches and the flat PY5OL
+// build (whose update-info.html sits at the server root).
+function checkVersionUrl(url, verEl, stEl, btn) {
+  let req = new XMLHttpRequest();
+  // Cache-bust: without this the browser serves update-info.html from disk cache
+  // and reports a stale "available version". A query param (rather than a
+  // Cache-Control header) avoids triggering a CORS preflight on the cross-origin fetch.
+  url += (url.indexOf("?") >= 0 ? "&" : "?") + "_=" + (new Date()).getTime();
+  req.open("GET", url);
+  req.onload = () => {
+    let avail = req.response.replace(/<[^>]*>/g, "").trim();
+    verEl.textContent = avail || "(unknown)";
+    let c = classify(avail);
+    btn.disabled = !c.ok;
+    stEl.textContent = c.msg;
+    stEl.className = "upd-status " + c.level;
+  };
+  req.onerror = () => {
+    // Can't validate without the available version; leave the button usable.
+    verEl.textContent = "(unavailable)";
+  };
+  req.send();
+}
+
+// Show the rows/forms for the chosen server, remember the choice, and (re)run the
+// version check(s) for whatever is now visible.
+function applyServer(server) {
+  const isPu = server === "py5ol";
+  document.getElementById("rowMain").style.display   = isPu ? "none" : "";
+  document.getElementById("rowDev2").style.display   = isPu ? "none" : "";
+  document.getElementById("rowPy5ol").style.display = isPu ? "" : "none";
+  document.getElementById("online-official").style.display = isPu ? "none" : "";
+  document.getElementById("online-py5ol").style.display   = isPu ? "" : "none";
+  const r = document.querySelector('input[name=updserver][value="' + server + '"]');
+  if (r) r.checked = true;
+  try { localStorage.setItem(SERVER_KEY, server); } catch (e) { /* private mode */ }
+
+  if (isPu) {
+    // PY5OL is a single flat build: update-info.html lives at the server root.
+    checkVersionUrl(hostFor("py5ol") + "/update-info.html",
+      document.getElementById("verPy5ol"),
+      document.getElementById("stPy5ol"),
+      document.getElementById("btnPy5ol"));
+  } else {
+    checkVersionUrl(hostFor("official") + "/main/update-info.html",
+      document.getElementById("verMain"),
+      document.getElementById("stMain"), document.getElementById("btnMain"));
+    checkVersionUrl(hostFor("official") + "/dev2/update-info.html",
+      document.getElementById("verDev2"),
+      document.getElementById("stDev2"), document.getElementById("btnDev2"));
+  }
+}
+
+// Restore the last-used server (default official) and wire the radio buttons.
+let savedServer = "official";
+try { savedServer = localStorage.getItem(SERVER_KEY) || "official"; } catch (e) { /* ignore */ }
+if (savedServer !== "official" && savedServer !== "py5ol") savedServer = "official";
+applyServer(savedServer);
+document.querySelectorAll('input[name=updserver]').forEach(radio =>
+  radio.addEventListener("change", () => applyServer(radio.value)));
+
+// Intercept the online / local-URL update forms: confirm, POST in the background,
+// then show a progress dialog that polls for the reboot and reloads. Submitting
+// normally would navigate away to the firmware's plain "wait until reboot" text.
+function startServerUpdate(form, submitter) {
+  // Build the urlencoded body in the order the firmware expects: the action button
+  // (main/dev2/local) first, and for a local update the url field AFTER "local".
+  const body = new URLSearchParams();
+  body.append(submitter.name, submitter.value);
+  if (submitter.name === "local") {
+    const u = form.querySelector("[name=url]");
+    if (u) body.append("url", u.value);
+  }
+  const dlg = showProgress("Sending update request…", "Updating");
+  fetch(form.action, { method: "POST", body: body, credentials: "same-origin" })
+    .then(r => {
+      if (!r.ok) return r.text().then(t => { throw new Error(t || ("HTTP " + r.status)); });
+      dlg.close();
+      waitForRebootAndReload(initialBootID, "Updating",
+        "The device is downloading and flashing the new version, then it will reboot. " +
+        "Do not power it off.");
+    })
+    .catch(err => { dlg.close(); showAlert("Could not start update: " + err.message); });
+}
+
+document.querySelectorAll('form[action="update.html"]').forEach(form => {
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const sub = e.submitter || form.querySelector("input[type=submit]");
+    if (!sub || sub.disabled) return;
+    const targetFork = BUTTON_FORK[sub.name];   // undefined for local-URL -> no gate
+    if (targetFork && targetFork !== installedFork) {
+      // Cross-fork update: require the user to type the target fork name so a fork
+      // switch can't be triggered by an accidental tap.
+      const word = targetFork.toUpperCase();
+      showPrompt(
+        "This switches your firmware from " + installedFork + " to " + targetFork +
+        " — these are different builds.\nType " + word +
+        " to continue. The device will reboot after updating.",
+        { title: "Switch firmware source?", placeholder: word, confirmWord: targetFork })
+        .then(ok => { if (ok) startServerUpdate(form, sub); });
+      return;
+    }
+    showConfirm(sub.value + " now?\nThe device will reboot after updating.")
+      .then(ok => { if (ok) startServerUpdate(form, sub); });
+  });
+});
+
+// Update-from-file: upload the selected firmware/filesystem image(s) to /uploadota with
+// an upload progress bar, then wait for the reboot and reload. Hidden unless enabled.
+function startFileUpload(form) {
+  const fd = new FormData();
+  let n = 0;
+  form.querySelectorAll("input[type=file]").forEach(inp => {
+    if (inp.files && inp.files.length) { fd.append(inp.name, inp.files[0]); n++; }
+  });
+  if (n === 0) { showAlert("Please choose at least one file to upload."); return; }
+  showConfirm("Upload " + n + " file(s) and apply?\nThe device will reboot afterwards.")
+    .then(ok => {
+      if (!ok) return;
+      const dlg = showProgress("Uploading… 0" + PCT, "Updating");
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", form.action);
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) dlg.update("Uploading… " + Math.round(e.loaded / e.total * 100) + PCT);
+      };
+      xhr.onload = () => {
+        if (xhr.status === 200) {
+          waitForRebootAndReload(initialBootID, "Updating",
+            "The uploaded image is being applied, then the device will reboot. Do not power it off.");
+        } else {
+          dlg.close();
+          showAlert("Upload failed: " + (xhr.responseText || ("HTTP " + xhr.status)));
+        }
+      };
+      xhr.onerror = () => { dlg.close(); showAlert("Upload failed (network error)."); };
+      xhr.send(fd);
+    });
+}
+
+// Reflect the chosen file's name in the styled picker. accept="" only filters by
+// extension, so flag (red) a name that differs from the expected one — but still
+// allow it, since the firmware detects firmware-vs-filesystem by content anyway.
+function refreshPick(inp) {
+  const pick = inp.closest(".filepick");
+  const fnEl = pick.querySelector(".filename");
+  if (inp.files && inp.files.length) {
+    const nm = inp.files[0].name, expect = inp.getAttribute("data-expect");
+    fnEl.textContent = nm;
+    pick.classList.add("has-file");
+    pick.classList.toggle("bad-name", !!expect && nm !== expect);
+  } else {
+    fnEl.textContent = "No file chosen";
+    pick.classList.remove("has-file", "bad-name");
+  }
+}
+
+const fileForm = document.getElementById("file-update-section");
+if (fileForm) {
+  if (fileUploadEnabled === "0" || fileUploadEnabled.trim() === "") {
+    fileForm.style.display = "none";
+  } else {
+    fileForm.querySelectorAll("input[type=file]").forEach(inp =>
+      inp.addEventListener("change", () => refreshPick(inp)));
+    fileForm.addEventListener("submit", e => { e.preventDefault(); startFileUpload(e.target); });
+  }
+}
 </script>
-</body></html>
+</body>
+</html>

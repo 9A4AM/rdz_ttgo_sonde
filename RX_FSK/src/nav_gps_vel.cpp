@@ -129,7 +129,7 @@ EPHEM_t *read_RNXpephs(const char *file) {
 
         //memset(&ephem, 0, sizeof(ephem));
 
-        l = fread(buf,  3, 1, fp);    if (l != 1) break;  buf[ 3] = 0;  sscanf(buf, "%d", &ui);
+        l = fread(buf,  3, 1, fp);    if (l != 1) break;  buf[ 3] = 0;  sscanf(buf, "%u", &ui);
         ephem.prn = ui;
 
         for (i = 0; i < 16; i++) ephem.epoch[i] = '0';

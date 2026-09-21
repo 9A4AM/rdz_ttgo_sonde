@@ -529,7 +529,22 @@ void DFM::decodeDAT(uint8_t *dat)
 		Serial.printf("Cycle done: good is %x\n", dfmstate.good);
 		si->temperature = get_Temp();
 		Serial.printf("Temp: %f\n", si->temperature);
-		dfmstate.cycledone = ((dfmstate.good&0x11F)==0x11F) ? 1 : 2; 
+		// Position freshness for live.json / livemap: check whether both the latitude
+		// and longitude DAT blocks were actually received during this cycle (their
+		// block index depends on posmode). If not, this cycle's vframe advanced without
+		// a fresh fix, so flag the kept position as old (0x80) so the map won't plot a
+		// stale position under a newer frame number. Only the 0x80 bit is touched, not the
+		// VALIDPOS low bits used by the display / SondeHub. Cleared once a full fix arrives.
+		{
+			uint16_t latbit, lonbit;
+			if(dfmstate.posmode <= 2) { latbit = 1u<<2; lonbit = 1u<<3; } // lat=DAT2, lon=DAT3
+			else                      { latbit = 1u<<1; lonbit = 1u<<2; } // lat=DAT1, lon=DAT2
+			if( (dfmstate.good & latbit) && (dfmstate.good & lonbit) )
+				si->validPos &= ~0x80;
+			else if(si->validPos)
+				si->validPos |= 0x80;
+		}
+		dfmstate.cycledone = ((dfmstate.good&0x11F)==0x11F) ? 1 : 2;
 		dfmstate.good = 0;
 		dfmstate.lastdat = 0;
 	} else {

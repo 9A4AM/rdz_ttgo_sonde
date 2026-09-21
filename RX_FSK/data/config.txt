@@ -34,6 +34,9 @@ tft_orient=1
 #gps_txd=-1
 # Frequency correction, in Hz
 # freqofs=0
+# LNA current boost (RegLna 0x0C LnaBoostHf): 0=default, 1=boost on (150% current)
+# Useful when no external LNA is used; default enabled
+# lnaboost=1
 #-------------------------------#
 # General config settings
 #-------------------------------#
@@ -67,6 +70,22 @@ channelbw=10
 spectrum=-1 #10
 noisefloor=-125
 marker=1
+scanplotint=60
+scan_smooth=-1
+scan_addwait=-1
+scan_iter=6
+#-------------------------------#
+# Auto-scan (peak detection; ignores qrg.txt when enabled)
+#-------------------------------#
+autoscan_enable=0
+autoscan_snr=10
+autoscan_mindist=1000
+autoscan_quant=10000
+autoscan_maxpeaks=10
+autoscan_dwell=12
+autoscan_typedwell=0
+autoscan_qrgfirst=1
+autoscan_exclude=
 #-------------------------------#
 # APRS settings
 #-------------------------------#
@@ -152,6 +171,15 @@ sondehub.fimaxage=6
 ss.active=1
 ss.host=239.255.0.1
 ss.port=62655
+#-------------------------------#
+# Sonde notifications (ntfy)
+#-------------------------------#
+notify.active=0
+notify.dist=10
+notify.alt=5
+notify.server=http://ntfy.sh
+notify.topic=
+notify.token=
 #-------------------------------#
 # EOF
 #-------------------------------#

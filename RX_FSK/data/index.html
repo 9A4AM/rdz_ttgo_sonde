@@ -4,22 +4,38 @@
   <title>rdzTTGOSonde Server</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta charset="UTF-8">
+  <meta name="color-scheme" content="light dark">
+  <script src="theme.js?v=%VERSION_ID%"></script>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" type="text/css" href="style.css">
+  <link rel="stylesheet" type="text/css" href="style.css?v=%VERSION_ID%">
 </head>
 <body>
  <div class="wrapper"><div class="header">
 <div class="topnav" id="myTopnav">
 	<a href="#home" onclick="selTab(event,'Home');fetchStatus()" class="tablinks" id="defaultTab">Home</a>
-	<a href="#qrg" onclick="selTab(event,'QRG')" class="tablinks">QRG</a>
+	<a href="#qrg" onclick="selTab(event,'QRG')" class="tablinks" data-minlevel="1">QRG</a>
 	<a href="#data" onclick="selTab(event,'Data')" class="tablinks">Data</a>
 	<a href="#livemap" onclick="document.location.href='livemap.html'" class="tablinks">Livemap</a>
-	<a href="#ctrl" onclick="selTab(event,'Control')" class="tablinks">Control</a>
-	<a href="#config" onclick="selTab(event,'Config')" class="tablinks">Config</a>
-	<a href="#wifi" onclick="selTab(event,'WiFi')" class="tablinks">WiFi</a>
+	<a href="#scanplot" onclick="document.location.href='scanplot.html'" class="tablinks">Scan Plot</a>
+	<a href="#ctrl" onclick="selTab(event,'Control')" class="tablinks" data-minlevel="1">Control</a>
+	<a href="#config" onclick="selTab(event,'Config')" class="tablinks" data-minlevel="1">Config</a>
+	<a href="#wifi" onclick="selTab(event,'WiFi')" class="tablinks" data-minlevel="2">WiFi</a>
+	<a href="#users" onclick="selTab(event,'Users')" class="tablinks" data-minlevel="2">Users</a>
 	<a href="javascript:void(0);" class="icon" onclick="myFunction()">
 		<span class="hamburger"></span>
 	</a>
+</div>
+<div class="usermenu" id="usermenu">
+	<div id="themeToggle" class="themetoggle-mount"></div>
+	<button type="button" class="usermenu-btn" id="usermenuBtn" aria-haspopup="true" aria-expanded="false">
+		<svg class="usermenu-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+			<circle cx="12" cy="7.5" r="3.8" fill="currentColor"/>
+			<path d="M4.5 19.5c0-3.6 3.4-5.5 7.5-5.5s7.5 1.9 7.5 5.5v1h-15z" fill="currentColor"/>
+		</svg>
+		<span class="usermenu-name" id="usermenuName">Login</span>
+		<span class="usermenu-caret" aria-hidden="true"></span>
+	</button>
+	<div class="usermenu-dropdown" id="usermenuDropdown" role="menu"></div>
 </div>
 </div>
 
@@ -60,7 +76,7 @@
  <a href="https://www.sondehub.org" target="_blank" class="button">sondehub.org</a>
 </div>
 </div>
-<div class="footer"><span class="ttgoinfo" id="userinfo"></span><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
+<div class="footer"><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
 
 </div>
 
@@ -81,6 +97,10 @@
 </div>
 
 <div id="Control" class="tabcontent" data-src="control.html">
+	<iframe class="tci" src="" ></iframe>
+</div>
+
+<div id="Users" class="tabcontent" data-src="users.html">
 	<iframe class="tci" src="" ></iframe>
 </div>
 </div>
@@ -116,9 +136,13 @@ function selTab(evt, id) {
 	for(i=0; i<tabcontent.length; i++) {
 		tabcontent[i].style.display = "none";
 		var link = tabcontent[i].dataset.src;
-		if(link) {
+		// Skip the tab being opened: it is navigated below, and blanking it first would
+		// fire a load event for about:blank that reveals the still-empty frame.
+		if(link && tabcontent[i].id != id) {
 			var iframe = tabcontent[i].getElementsByTagName("iframe")[0];
+			iframe.classList.remove("loaded");
 			iframe.setAttribute("src", "");
+			tabcontent[i].classList.remove("loading");   // abandoned mid-load: start clean next time
 		}
 	}
 	tablinks=document.getElementsByClassName("tablinks");
@@ -132,11 +156,33 @@ function selTab(evt, id) {
 	var link = act.dataset.src;
 	if(link) {
 		var iframe = act.getElementsByTagName("iframe")[0];
+		// Hide the frame for this navigation and let its own load event reveal it
+		// (.tci is visibility:hidden until .loaded), showing a spinner meanwhile.
+		// Setting src always navigates, even to the same URL, so re-clicking the
+		// active tab still reloads it.
+		iframe.classList.remove("loaded");
+		act.classList.add("loading");
 		iframe.setAttribute("src", link);
 	}
 	var x = document.getElementById("myTopnav");
     x.className = "topnav";
 }
+// Reveal each tab frame only once its own document has loaded and applied the theme
+// (.tci stays visibility:hidden until .loaded -- see style.css). The about:blank that
+// src="" produces is deliberately ignored: an empty frame carries no data-theme and no
+// stylesheet, so it would show as a white rectangle inside the dark UI.
+// Registered here, before the whoami fetch resolves, so it is in place for the first selTab.
+Array.prototype.forEach.call(document.getElementsByClassName("tci"), function(fr) {
+	fr.addEventListener("load", function() {
+		var href = "";
+		try { href = fr.contentWindow.location.href; } catch(e) { href = ""; }
+		if(href && href.indexOf("about:") !== 0) {
+			fr.classList.add("loaded");
+			fr.parentNode.classList.remove("loading");
+		}
+	});
+});
+
 /* Toggle between adding and removing the "responsive" class to topnav when the user clicks on the icon */
 function myFunction() {
   var x = document.getElementById("myTopnav");
@@ -146,28 +192,83 @@ function myFunction() {
     x.className = "topnav";
   }
 }
-document.getElementById("defaultTab").click();
-
-const bootID = "%BOOTID%";
-const prevID = localStorage.getItem("bootID");
-if(prevID && prevID !== bootID) {
-  document.cookie = `SESSION=; expires:Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+// Hide nav tabs the current user cannot access (mirrors the server-side auth checks), then
+// restore the tab named in the URL hash on reload (e.g. #users), else default to Home.
+// Skip #livemap/#scanplot: those links navigate to separate pages rather than switching tabs.
+function applyAccess(level) {
+	var links = document.getElementsByClassName("tablinks");
+	for(var i=0; i<links.length; i++) {
+		var need = parseInt(links[i].dataset.minlevel || "0", 10);
+		links[i].style.display = (need > level) ? "none" : "";
+	}
+	var hash = location.hash;
+	var tab = (hash && hash !== "#livemap" && hash !== "#scanplot")
+		? document.querySelector('.tablinks[href="' + hash + '"]')
+		: null;
+	if(tab && tab.style.display === "none") tab = null;  // requested tab is not accessible
+	(tab || document.getElementById("defaultTab")).click();
 }
-localStorage.setItem("bootID", bootID);
+fetch('/whoami.json')
+	.then(response => response.json())
+	.then(data => applyAccess(typeof data.level === "number" ? data.level : 2))
+	.catch(() => applyAccess(2));  // on error show all tabs; the firmware still enforces access
 
-const sessionC  = document.cookie.split("; ").find((row) => row.startsWith("SESSION="))?.split("=")[1];
-if(sessionC) {
-  const [user] = sessionC.split(':');
-  document.getElementById("userinfo").innerHTML = `User: ${user} <a href="#" id="logoutLink" style="margin-left: 10px; color: white;">Logout</a>`;
-  const logoutLink = document.getElementById("logoutLink");
-  logoutLink.addEventListener("click", function(event) {
-     event.preventDefault(); // Prevent default link behavior
-     document.cookie = `SESSION=; expires:Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
-     location.reload(); // Reload the page
-  });
-} else {
-  document.getElementById("userinfo").innerHTML = `<a style="color: white;" href="login.html">Login</a>`;
+// Sessions are stateless JWTs signed with a stable device key, so they survive reboots and
+// need no bootID-based cookie clearing here.
+
+// Decode the username from a JWT session cookie (payload "sub" claim); null if not present.
+function jwtUser(jwt) {
+  try {
+    const p = jwt.split(".")[1];
+    const json = atob(p.replace(/-/g, "+").replace(/_/g, "/"));
+    return JSON.parse(json).sub || null;
+  } catch (e) { return null; }
 }
+
+// Top-right user menu: a dropdown with Log out when signed in, or a direct Login link otherwise.
+(function() {
+  const menu = document.getElementById("usermenu");
+  const btn  = document.getElementById("usermenuBtn");
+  const name = document.getElementById("usermenuName");
+  const dd   = document.getElementById("usermenuDropdown");
+
+  const sessionC = document.cookie.split("; ").find((row) => row.startsWith("SESSION="))?.split("=")[1];
+  const user = sessionC ? jwtUser(sessionC) : null;
+
+  function closeMenu() { menu.classList.remove("open"); btn.setAttribute("aria-expanded", "false"); }
+
+  if (user) {
+    name.textContent = user;
+    const hdr = document.createElement("div");
+    hdr.className = "mi-header";
+    hdr.textContent = "Signed in as " + user;
+    const out = document.createElement("button");
+    out.type = "button"; out.className = "mi"; out.textContent = "Log out";
+    out.addEventListener("click", function() {
+      document.cookie = "SESSION=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+      window.location.href = "/logout";   // revoke the server-side session, then show login
+    });
+    dd.appendChild(hdr);
+    dd.appendChild(out);
+
+    btn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      menu.classList.toggle("open");
+      btn.setAttribute("aria-expanded", menu.classList.contains("open") ? "true" : "false");
+    });
+    document.addEventListener("click", closeMenu);
+    document.addEventListener("keydown", function(e) { if (e.key === "Escape") closeMenu(); });
+  } else {
+    // Not logged in: no menu needed, the button is a direct link to the login page.
+    // Carry the current page + open tab (#hash) so login returns here afterwards.
+    name.textContent = "Login";
+    menu.classList.add("usermenu-guest");
+    btn.addEventListener("click", function() {
+      var here = window.location.pathname + window.location.hash;
+      window.location.href = "/login.html?next=" + encodeURIComponent(here);
+    });
+  }
+})();
 
 </script>
 

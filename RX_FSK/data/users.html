@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="color-scheme" content="light dark">
+  <script src="theme.js?v=%VERSION_ID%"></script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>User Management</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" type="text/css" href="style.css?v=%VERSION_ID%">
+  <script src="dialog.js?v=%VERSION_ID%"></script>
+  <style>
+    /* Users page buttons: match the project's green-primary / subtle-icon system */
+    #addForm button[type="submit"] {
+      background-color: var(--brand); color: var(--on-brand); border:none; border-radius:5px;
+      padding:8px 24px; font-size:14px; cursor:pointer; transition:background-color .3s ease;
+    }
+    #addForm button[type="submit"]:hover { background-color: var(--brand-hover); }
+    #addForm button[type="submit"]:active { transform:translateY(1px); }
+    /* password reveal toggles: subtle icon, vertically aligned with the field */
+    .revealbtn {
+      border:none; background:none; cursor:pointer; font-size:1.1em;
+      line-height:1; padding:0 4px; color: var(--heading); vertical-align:middle;
+    }
+    /* the form action row: keep the Save button and its status message aligned */
+    .formactions { display:flex; align-items:center; gap:1em; margin-top:4px; }
+    /* action column in the user list */
+    #userTable td:last-child { text-align:center; white-space:nowrap; }
+    /* delete = destructive trash-icon button (reuses .iconbtn base) */
+    .delbtn { background-color: var(--danger); padding:5px 10px; font-size:16px; }
+    .delbtn:hover { background-color: var(--danger-hover); }
+    .delbtn svg { display:block; }
+  </style>
+</head>
+<body>
+<div class="wrapper">
+ <div class="content">
+  <table id="userTable">
+    <tr><th>Username</th><th>Level</th><th></th></tr>
+  </table>
+
+  <h3>Add / update user</h3>
+  <p id="bootstrapNote" style="display:none; font-weight:bold;">
+    No accounts exist yet. The first account must be an administrator (level 2).
+    After it is created you will need to log in to continue managing users.
+  </p>
+  <form id="addForm">
+    <label>Username: <input type="text" id="u" required></label><br><br>
+    <label>Level:
+      <select id="l">
+        <option value="1">1 &ndash; read only</option>
+        <option value="2" selected>2 &ndash; full access</option>
+      </select>
+    </label><br><br>
+    <label>Password: <input type="password" id="p" required></label>
+    <button type="button" id="tp" class="revealbtn" title="Show password" aria-label="Show password">&#128065;</button><br><br>
+    <label>Confirm password: <input type="password" id="p2" required></label>
+    <button type="button" id="tp2" class="revealbtn" title="Show password" aria-label="Show password">&#128065;</button>
+    <span id="pmsg" style="margin-left:1em;color:var(--danger-text);"></span><br><br>
+    <div class="formactions">
+      <button type="submit">Save</button>
+      <span id="msg"></span>
+    </div>
+  </form>
+  <p><small>Note: an existing username is overwritten. Passwords are stored in <code>/user.txt</code>.</small></p>
+ </div>
+ <div class="footer"><div class="footer-left"></div><span class="ttgoinfo">rdzTTGOserver %VERSION_ID%</span></div>
+</div>
+
+<script>
+var userCount = 0;   // number of existing accounts (drives the "first user" bootstrap behaviour)
+
+function applyBootstrapMode() {
+  // When no accounts exist yet, the first one must be an admin (level 2): lock the selector.
+  const first = (userCount === 0);
+  const sel = document.getElementById('l');
+  sel.value = '2';
+  sel.disabled = first;
+  document.getElementById('bootstrapNote').style.display = first ? 'block' : 'none';
+}
+
+function makeReveal(btnId, fieldId) {
+  // Toggle a single password field between hidden/visible; swap the icon to show state.
+  const btn = document.getElementById(btnId);
+  const fld = document.getElementById(fieldId);
+  btn.addEventListener('click', function() {
+    const show = fld.type === 'password';
+    fld.type = show ? 'text' : 'password';
+    btn.innerHTML = show ? '&#128584;' : '&#128065;';   // see-no-evil / eye
+    btn.title = show ? 'Hide password' : 'Show password';
+    btn.setAttribute('aria-label', btn.title);
+  });
+}
+makeReveal('tp', 'p');
+makeReveal('tp2', 'p2');
+
+function checkMatch() {
+  // Live hint: only complain once both fields have content and they differ.
+  const p = document.getElementById('p').value;
+  const p2 = document.getElementById('p2').value;
+  const mismatch = p && p2 && p !== p2;
+  document.getElementById('pmsg').textContent = mismatch ? 'Passwords do not match' : '';
+  return !mismatch;
+}
+document.getElementById('p').addEventListener('input', checkMatch);
+document.getElementById('p2').addEventListener('input', checkMatch);
+
+function loadUsers() {
+  fetch('/users.json').then(r => r.json()).then(list => {
+    userCount = list.length;
+    const t = document.getElementById('userTable');
+    t.innerHTML = '<tr><th>Username</th><th>Level</th><th></th></tr>';
+    list.forEach(u => {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td'); td1.textContent = u.user;
+      const td2 = document.createElement('td'); td2.textContent = u.level;
+      const td3 = document.createElement('td');
+      const b = document.createElement('button');
+      b.className = 'iconbtn delbtn';
+      b.title = 'Delete user "' + u.user + '"';
+      b.setAttribute('aria-label', b.title);
+      b.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+      b.addEventListener('click', () => delUser(u.user));
+      td3.appendChild(b);
+      tr.appendChild(td1); tr.appendChild(td2); tr.appendChild(td3);
+      t.appendChild(tr);
+    });
+    applyBootstrapMode();
+  }).catch(() => { document.getElementById('msg').textContent = 'Failed to load users.'; });
+}
+
+function post(body) {
+  return fetch('/users.html', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body
+  });
+}
+
+function delUser(user) {
+  showConfirm('Delete user "' + user + '"?').then(function(ok) {
+    if (!ok) return;
+    post('action=del&user=' + encodeURIComponent(user))
+      .then(r => r.text())
+      .then(t => {
+        showAlert(t === 'ok' ? 'User "' + user + '" deleted.' : ('Error: ' + t));
+        loadUsers();
+      });
+  });
+}
+
+document.getElementById('addForm').addEventListener('submit', function(e) {
+  e.preventDefault();
+  const wasFirst = (userCount === 0);   // creating the first account locks user management
+  const u = document.getElementById('u').value;
+  const l = wasFirst ? '2' : document.getElementById('l').value;
+  const p = document.getElementById('p').value;
+  const p2 = document.getElementById('p2').value;
+  if (p !== p2) {
+    document.getElementById('pmsg').textContent = 'Passwords do not match';
+    return;
+  }
+  post('action=add&user=' + encodeURIComponent(u) +
+       '&level=' + encodeURIComponent(l) +
+       '&pass=' + encodeURIComponent(p))
+    .then(r => r.text())
+    .then(t => {
+      if (t !== 'ok') {
+        document.getElementById('msg').textContent = 'Error: ' + t;
+        return;
+      }
+      document.getElementById('p').value = '';
+      document.getElementById('p2').value = '';
+      document.getElementById('pmsg').textContent = '';
+      if (wasFirst) {
+        // The device just locked down user management; the operator must now authenticate.
+        showAlert('Account "' + u + '" created as administrator.\n\n' +
+                  'User management now requires logging in. You will be redirected to the login page.')
+          .then(function() {
+            var back = window.top.location.pathname + window.top.location.hash;
+            window.top.location.href = '/login.html?next=' + encodeURIComponent(back);
+          });
+        return;
+      }
+      document.getElementById('msg').textContent = 'Saved.';
+      loadUsers();
+    });
+});
+
+loadUsers();
+</script>
+</body>
+</html>

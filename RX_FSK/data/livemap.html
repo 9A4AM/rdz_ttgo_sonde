@@ -3,14 +3,17 @@
 <head>
   <title>rdzTTGOSonde Server LiveMap</title>
   <meta charset="utf-8" />
+  <meta name="color-scheme" content="light dark">
+  <script src="theme.js?v=%VERSION_ID%"></script>
   <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
-  <link rel="stylesheet" type="text/css" href="style.css" />
+  <link rel="stylesheet" type="text/css" href="style.css?v=%VERSION_ID%" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.8.0/dist/leaflet.css" />
   <script>var mapcenter=[%MAPCENTER%];</script>
   <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
   <script src="https://unpkg.com/leaflet@1.8.0/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.marker.slideto@0.2.0/Leaflet.Marker.SlideTo.js"></script>
-  <script src="livemap.js"></script>
+  <script src="dialog.js?v=%VERSION_ID%"></script>
+  <script src="livemap.js?v=%VERSION_ID%"></script>
 </head>
 <body>
   <div id="map"></div>

@@ -38,6 +38,7 @@ extern const char *version_name;
 extern const char *version_id;
 
 extern WiFiUDP udp;
+extern boolean connected;
 
 void tcpclient_fsm();
 
@@ -114,7 +115,7 @@ void ConnAPRS::updateSonde( SondeInfo *si ) {
             long tts =  sonde.config.tcpfeed.highrate * 1000L - (now-lasttcp);
             Serial.printf("aprs: now-last = %ld\n", (now - lasttcp));
             if ( tts < 0 ) {
-                strcat(str, "\r\n");
+                if(strlen(str) <= APRS_MAXLEN) strcat(str, "\r\n");  // str is b[251]; keep the append in bounds
                 Serial.printf("Sending APRS: %s",str);
         if(aprs[0].tcpclient_state == TCS_CONNECTED)
                     write(aprs[0].tcpclient, str, strlen(str));
@@ -134,7 +135,7 @@ static void check_timeout(st_aprs *a) {
     Serial.printf("Checking APRS timeout: last_in - new: %ld\n", millis() - a->last_in);
     if ( a->last_in && ( (millis() - a->last_in) > sonde.config.tcpfeed.timeout*1000 ) ) {
         Serial.println("APRS timeout - closing connection");
-        if(a->tcpclient>0) {
+        if(a->tcpclient>=0) {
             close(a->tcpclient);
             a->tcpclient = -1;
         }
@@ -172,6 +173,8 @@ void ConnAPRS::updateStation( PosInfo *pi ) {
         Serial.println("");
     }
 }
+
+bool ConnAPRS::replayReady() { return connected; }
 
 static void aprs_beacon(char *bcn, st_aprs *aprs) {
   if(aprs->tcpclient_state == TCS_CONNECTED) {
@@ -236,7 +239,7 @@ void tcpclient_sendlogin(st_aprs *a) {
     Serial.printf("APRS login: %s, res=%d\n", buf, res);
     a->last_in = millis();
     if(res<=0) {
-        if( a->tcpclient>0 ) close(a->tcpclient);
+        if( a->tcpclient>=0 ) close(a->tcpclient);
         a->tcpclient = -1;
         a->tcpclient_state = TCS_DISCONNECTED;
     }
@@ -384,7 +387,7 @@ static void tcpclient_fsm_single(st_aprs *a) {
     return;
 
 error:
-    if(a->tcpclient > 0) close(a->tcpclient);
+    if(a->tcpclient >= 0) close(a->tcpclient);
     a->tcpclient = -1;
     a->tcpclient_state = TCS_DISCONNECTED;
     return;

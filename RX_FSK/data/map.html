@@ -1,5 +1,6 @@
 <html>
 <head>
+<meta name="color-scheme" content="light dark">
 <script>
 maptype = "SH"; // TODO: Get from config
 
@@ -22,12 +23,16 @@ document.addEventListener("DOMContentLoaded", function(){
         } else {
           urlarg = maps[maptype][1](data.sonde.ser||'');
         }
+        // #00A3D3 is a raw literal rather than a theme token: it is a fixed accent on this
+        // embedded third-party map iframe, not a themed UI element, and it reads acceptably
+        // against both light and dark.
         iftxt='<iframe src="' + maps[maptype][0] + urlarg + '" style="border:1px solid #00A3D3;border-radius:20px;height:98vh;width:100%"></iframe>';
-        document.getElementsByTagName('body')[0].innerHTML = iftxt;
+        document.getElementById('mapframe').innerHTML = iftxt;
      })
 })
 </script>
 </head>
 <body>
+<div id="mapframe"></div>
 </body>
 </html>

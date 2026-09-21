@@ -6,6 +6,7 @@
 
 extern const char *sondeTypeStrSH[];
 extern WiFiUDP udp;
+extern boolean connected;
 
 void ConnChasemapper::init() {
 }
@@ -68,6 +69,8 @@ void ConnChasemapper::updateSonde(SondeInfo *si) {
 
 void ConnChasemapper::updateStation(PosInfo *pi) {
 }
+
+bool ConnChasemapper::replayReady() { return sonde.config.cm.active && connected; }
 
 String ConnChasemapper::getStatus() {
         if(!sonde.config.cm.active) return String("disabled");

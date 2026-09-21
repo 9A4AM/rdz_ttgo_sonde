@@ -33,6 +33,7 @@ python -m ttgoconfig.cli flash --download main    # download and flash Stable (m
 python -m ttgoconfig.cli backup --port /dev/cu.usbserial-0001
 python -m ttgoconfig.cli wifi get --kind all --dir ./out
 python -m ttgoconfig.cli sd list
+python -m ttgoconfig.cli improv wifiscan           # provision WiFi over serial (IMPROV)
 ```
 
 See `python -m ttgoconfig.cli --help` and per-command help (e.g. `python -m ttgoconfig.cli flash --help`) for all options. The legacy script `scripts/ttgoconfig.py` is a wrapper that runs the CLI; prefer `python -m ttgoconfig.cli` directly.

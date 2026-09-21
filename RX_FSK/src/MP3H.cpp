@@ -491,7 +491,7 @@ int MP3H::receive() {
 
 	unsigned long t0 = millis();
 	Serial.printf("MP3H::receive() start at %ld\n",t0);
-   	while( millis() - t0 < 1100 + (retval!=RX_TIMEOUT)?1000:0 ) {
+   	while( millis() - t0 < 1100 + ((retval!=RX_TIMEOUT)?1000:0) ) {
 		uint8_t value = sx1278.readRegister(REG_IRQ_FLAGS2);
 		if ( bitRead(value, 7) ) {
 			Serial.println("FIFO full");

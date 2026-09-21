@@ -1,7 +1,197 @@
+/* =========================================================================
+   Theme tokens. Light values live here; the dark set is in the two blocks
+   at the end of this file. Colors elsewhere in this file MUST be var(--...)
+   references -- the only exceptions are the two select-caret data-URI SVGs
+   (a data: URL cannot contain var()) and the fixed status dots (.ybg/.gbg/
+   .rbg), which mean the same thing in both themes.
+   ========================================================================= */
+:root {
+  color-scheme: light;
+
+  --bg: #fff;                 /* page background */
+  --bg-alt: #f4f4f4;          /* table header / subtle fill */
+  --surface: #fff;            /* cards, modals, popups, select options */
+  --surface-translucent: rgba(255, 255, 255, 0.8);  /* .leaflet-center over the map */
+  --table-bg: #ddd;           /* legacy table/th/td fill */
+  --table-caption-bg: #aaa;   /* td#caption */
+  --table-sfreq-bg: #ccc;     /* td#sfreq */
+
+  --text: #333;               /* default text */
+  --body-text: #000;          /* browser default */
+  --text-strong: #000;        /* emphasised text on light fills */
+  --text-body: #545454;       /* modal copy */
+  --text-secondary: #444;     /* .system-info paragraphs */
+  --text-muted: #777;         /* secondary notes */
+  --text-faint: #999;         /* hints, filenames */
+  --option-text: #222;        /* open <select> option list */
+  --heading: #0F3376;         /* h1 */
+  --link: #0000ee;            /* a:link/a:visited */
+
+  --border: #ccc;
+  --border-soft: #ddd;
+  --border-strong: #bbb;
+  --border-input: #c9c9c9;    /* .modal-input, .filebtn */
+  --border-hairline: #e3e3e3; /* upd.html file rows */
+  --table-border: black;      /* the legacy `table, th, td` border */
+  --panel-hover-bg: #808080;  /* .cfgpanel:hover td */
+
+  --field-bg: #fff;
+  --field-border: #bbb;
+  --field-text: #333;
+
+  --brand: #04AA6D;           /* brand green as a BACKGROUND (buttons) */
+  --brand-hover: #038f5b;
+  --brand-active: #037a4d;
+  --brand-disabled: #9bbfae;
+  --brand-text: #04AA6D;      /* brand green as TEXT (needs its own contrast) */
+  --brand-ring: rgba(4, 170, 109, 0.20);
+  --brand-ring-strong: rgba(4, 170, 109, 0.40);
+  --on-brand: #fff;           /* text on a brand-colored fill */
+
+  --danger: #CC1111;          /* destructive BACKGROUND */
+  --danger-hover: #b30f0f;
+  --danger-text: #c00;        /* destructive TEXT */
+
+  --neutral-btn: #6e7881;
+  --neutral-btn-hover: #5f686f;
+  --neutral-btn-active: #545c62;
+  --neutral-ring: rgba(110, 120, 129, 0.5);
+  --disabled-btn: #6c757d;
+  --disabled-btn-text: #cfd3d6;
+
+  --nav-bg: #333;
+  --nav-text: #f2f2f2;
+  --nav-icon: #fff;           /* .hamburger bars */
+  --nav-hover-bg: #ddd;
+  --nav-hover-text: #000;
+  --menu-bg: #3a3a3a;
+  --menu-text: #f2f2f2;
+  --menu-muted: #bbb;
+  --menu-border: #4a4a4a;
+
+  --shadow: rgba(0, 0, 0, 0.18);
+  --shadow-strong: rgba(0, 0, 0, 0.35);
+  --shadow-menu: rgba(0, 0, 0, 0.65);
+  --overlay: rgba(0, 0, 0, 0.4);
+  --spinner-track: #e6e6e6;
+  --accent-info: #007BFF;     /* #refresh-button:hover */
+}
+
+/* --border-hairline, --border-soft, --brand-text, --danger-text and --text-faint are
+   referenced by no rule in this file. That is intentional, not dead weight: they are
+   consumed by the other pages' inline styles (upd.html, sdfiles.html, users.html). Do
+   not delete them, and do not add rules here just to use them. */
+
 body, html {
 	height: 100%;
 	margin: 0;
 	font-family: Arial;
+	background-color: var(--bg);
+}
+
+/* Modal dialogs (dialog.js) -- replaces native alert()/confirm().
+   Styled to resemble SweetAlert2's default theme (centered card, bounce-in,
+   indigo confirm + grey cancel) without bundling the library. */
+.modal-overlay {
+	position: fixed;
+	top: 0; right: 0; bottom: 0; left: 0;
+	z-index: 1060;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 16px;
+	background: var(--overlay);
+	animation: modalFade 0.15s ease-out;
+}
+.modal-box {
+	background: var(--surface);
+	color: var(--text-body);
+	width: auto;
+	min-width: 15em;
+	max-width: 26em;
+	border-radius: 14px;
+	padding: 1.75em 1.75em 1.4em;
+	box-shadow: 0 10px 40px var(--shadow);
+	font-family: Arial, sans-serif;
+	font-size: 16px;
+	text-align: center;
+	animation: modalPop 0.3s;
+}
+.modal-msg {
+	white-space: pre-line;
+	line-height: 1.55;
+	font-size: 1.125em;
+	color: var(--text-body);
+	margin: 0 0 1.5em;
+}
+.modal-input {
+	display: block;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 0.55em 0.7em;
+	margin: 0 0 1.4em;
+	font-size: 1.05em;
+	border: 1px solid var(--border-input);
+	border-radius: 0.25em;
+}
+.modal-input:focus {
+	outline: none;
+	border-color: var(--brand);   /* project green accent */
+	box-shadow: 0 0 0 3px var(--brand-ring);
+}
+/* Progress dialog (showProgress): spinner + bold title above the message. */
+.modal-spinner {
+	width: 42px; height: 42px; margin: 0.1em auto 1.1em;
+	border: 4px solid var(--spinner-track); border-top-color: var(--brand);
+	border-radius: 50%; animation: modalSpin 0.9s linear infinite;
+}
+.modal-title { font-size: 1.2em; font-weight: 700; color: var(--text); margin: 0 0 0.55em; }
+@keyframes modalSpin { to { transform: rotate(360deg); } }
+.modal-actions {
+	display: flex;
+	flex-direction: row-reverse;   /* confirm on the left, cancel on the right (SweetAlert2 order) */
+	justify-content: center;
+	gap: 0.6em;
+}
+.modal-btn {
+	border: 0;
+	border-radius: 0.25em;
+	padding: 0.625em 1.6em;
+	font-size: 1em;
+	font-weight: 500;
+	color: var(--on-brand);
+	cursor: pointer;
+	transition: background-color .15s, box-shadow .15s;
+}
+.modal-btn:focus-visible {
+	outline: none;
+	box-shadow: 0 0 0 3px var(--brand-ring-strong);
+}
+.modal-btn-primary { background-color: var(--brand); }   /* project green accent */
+.modal-btn-primary:hover { background-color: var(--brand-hover); }
+.modal-btn-primary:active { background-color: var(--brand-active); }
+.modal-btn-cancel { background-color: var(--neutral-btn); }
+.modal-btn-cancel:hover { background-color: var(--neutral-btn-hover); }
+.modal-btn-cancel:active { background-color: var(--neutral-btn-active); }
+.modal-btn-cancel:focus-visible { box-shadow: 0 0 0 3px var(--neutral-ring); }
+/* Disabled OK button (showPrompt gate: text doesn't yet match confirmWord). Muted
+   green matches .updbtn:disabled; :disabled:hover keeps the hover rule from re-darkening. */
+.modal-btn:disabled { cursor: not-allowed; opacity: 0.7; }
+.modal-btn-primary:disabled,
+.modal-btn-primary:disabled:hover { background-color: var(--brand-disabled); }
+
+@keyframes modalFade { from { opacity: 0; } to { opacity: 1; } }
+/* SweetAlert2's signature show animation (swal2-show) */
+@keyframes modalPop {
+	0%   { transform: scale(0.7); }
+	45%  { transform: scale(1.05); }
+	80%  { transform: scale(0.95); }
+	100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.modal-overlay, .modal-box, .modal-spinner { animation: none; }
+	/* Still a visible ring, just not spinning. */
+	.tabcontent.loading::after { animation: none; }
 }
 
 .system-info {
@@ -11,7 +201,11 @@ body, html {
     overflow-y: auto;
 }
 .system-info p {
-    margin: 8px 0;
+    margin: 10px auto;   /* auto L/R so paragraphs stay centered in the full-width panel */
+    font-size: 15px;
+    font-weight: normal;
+    line-height: 1.55;
+    color: var(--text-secondary);
 }
 .system-info h1 {
     font-size: 24px;
@@ -24,12 +218,12 @@ body, html {
 }
 .status-table th, .status-table td {
     padding: 10px;
-    border: 1px solid #ccc;
+    border: 1px solid var(--border);
     text-align: left;
     vertical-align: top;
 }
 .status-table th {
-    background-color: #f4f4f4;
+    background-color: var(--bg-alt);
     font-weight: bold;
 }
 #refresh-button {
@@ -38,7 +232,7 @@ body, html {
     cursor: pointer;
 }
 #refresh-button:hover {
-    color: #007BFF;
+    color: var(--accent-info);
 }
 
 h2.external-links {
@@ -55,8 +249,8 @@ h2.external-links {
 }
 
 .link-buttons .button {
-    background-color: #04AA6D;
-    color: white;
+    background-color: var(--brand);
+    color: var(--on-brand);
     padding: 15px 20px;
     text-decoration: none;
     border-radius: 5px;
@@ -66,13 +260,13 @@ h2.external-links {
 
 
 .active, .cfgheader:hover {
-  background-color: #ccc;
+  background-color: var(--border);
 }
 .cfgpanel {
 }
 .cfgpanel:hover td, .cfgpanel:active td{
-    background-color: #808080 !important;
-    color: white;
+    background-color: var(--panel-hover-bg) !important;
+    color: var(--on-brand);
 }
 
 th.cfg {
@@ -88,8 +282,8 @@ table.stat {
   width: 1.25em;
   height: 0.8em;
   margin-right: 0.3em;
-  border-top: 0.2em solid #fff;
-  border-bottom: 0.2em solid #fff;
+  border-top: 0.2em solid var(--nav-icon);
+  border-bottom: 0.2em solid var(--nav-icon);
 }
 
 .hamburger:before {
@@ -98,7 +292,7 @@ table.stat {
   top: 0.3em;
   left: 0px;
   width: 100%;
-  border-top: 0.2em solid #fff;
+  border-top: 0.2em solid var(--nav-icon);
 }
 
 .wrapper {
@@ -109,9 +303,20 @@ table.stat {
 }
 .tci {
   flex-grow: 1; border: none; margin: 0; padding: 0; overflow-y: auto;
+  /* Hidden until the frame's own document has loaded and themed itself (index.html
+     adds .loaded on the iframe's load event). A frame that is still blank has no
+     data-theme and no style.css, so its color scheme resolves light; when that
+     differs from the embedder's (dark UI over a light OS preference) the browser
+     keeps the frame's canvas opaque and paints it white, over the background-color
+     below -- which is why that rule alone cannot cover the gap. Uncached, the gap
+     lasts a whole qrg.html + style.css fetch from the device.
+     visibility, not display: the flex box keeps its size, so revealing the frame
+     does not reflow the tab. */
+  visibility: hidden;
 }
+.tci.loaded { visibility: visible; }
 .footer {
- background-color: #333;
+ background-color: var(--nav-bg);
  display: flex;
  justify-content: space-between;
 }
@@ -124,19 +329,19 @@ td.act {
   text-align: center;
 }
 table, th, td {
-	border: 1px solid black;
+	border: 1px solid var(--table-border);
 	border-collapse: collapse;
-	background-color: #ddd
+	background-color: var(--table-bg)
 }
 
 td#caption {
 	text-align: center;
-	background-color: #aaa;
+	background-color: var(--table-caption-bg);
 	font-weight: bold;
 }
 
 td#sfreq {
-	background-color: #ccc;
+	background-color: var(--table-sfreq-bg);
 }
 
 .content {
@@ -152,30 +357,72 @@ td#sfreq {
 	border-top: none;
 	flex-direction: column;
 	overflow: auto;
+	position: relative;   /* containing block for the loading spinner below */
+}
+/* Loading affordance for the tabs that are iframes: the frame is hidden until it has
+   themed itself (see .tci), which without this leaves an empty panel for as long as the
+   device takes to render the page -- clearly noticeable on real hardware. index.html adds
+   .loading when it navigates a frame and drops it in the frame's load handler.
+   Absolutely positioned, so it centres over the panel instead of being laid out after the
+   hidden frame, which already fills the column. Same geometry/animation as .modal-spinner:
+   42px content box + 4px border = 50px, hence the -25px offsets. */
+.tabcontent.loading::after {
+	content: "";
+	position: absolute;
+	top: 50%; left: 50%;
+	width: 42px; height: 42px; margin: -25px 0 0 -25px;
+	border: 4px solid var(--spinner-track); border-top-color: var(--brand);
+	border-radius: 50%; animation: modalSpin 0.9s linear infinite;
 }
 
 html {
   font-family: Helvetica;
-  display: inline-block;
-  margin: 0px auto;
+  display: block;          /* inline-block here would break margin:0 auto centering of forms */
   text-align: left;
 }
 h1{
-  color: #0F3376;
+  color: var(--heading);
   font-size: 24px
 }
 
 .button2 {
-  background-color: #f44336;
+  background-color: var(--danger);
 }
 :disabled.save {
   opacity: 0.5;
 }
+/* Footer backup/restore icon buttons on the qrg/config forms */
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.bkpbtns {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--brand);
+  color: var(--on-brand);
+  border: none;
+  border-radius: 5px;
+  padding: 6px 12px;
+  font-size: 18px;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+.iconbtn:hover { background-color: var(--brand-hover); }
 .save {
-  background-color: #CC1111; /* 0F33C6; */
-  border: white;
+  background-color: var(--danger);
+  border: var(--on-brand);
   border-width: 1;
-  color: white;
+  color: var(--on-brand);
   padding: 8px 30px;
   text-align: center;
   text-decoration: none;
@@ -185,17 +432,17 @@ h1{
 }
 
 .ttgoinfo {
-  color: white;
+  color: var(--on-brand);
   padding: 8px 10px;
   display: block;
   font-size: 14px;
   margin: 0
 }
 .ctlbtn {
-  background-color: #ccc;
-  border: black;
+  background-color: var(--border);
+  border: var(--text-strong);
   border-width: 1;
-  color: black;
+  color: var(--text-strong);
   padding: 4px 30px;
   text-align: center;
   text-decoration: none;
@@ -216,7 +463,7 @@ h1{
 
 .leaflet-popup-content table, .leaflet-popup-content table td {
 	border:0;
-	background-color: white;
+	background-color: var(--surface);
 }
 
 .leaflet-popup-content table td:nth-child(2),.leaflet-popup-content table td:nth-child(5) {
@@ -264,7 +511,7 @@ h1{
 .leaflet-header {
     text-align: center;
     width: 250px;
-    box-shadow: 0 1px 5px rgba(0,0,0,0.65);
+    box-shadow: 0 1px 5px var(--shadow-menu);
     border-bottom-left-radius: 4px;
     border-bottom-right-radius: 4px;
     pointer-events: auto !important;
@@ -291,7 +538,7 @@ h1{
 		display:none;
     text-align: center;
     width: 180px;
-    box-shadow: 0 1px 5px rgba(0,0,0,0.65);
+    box-shadow: 0 1px 5px var(--shadow-menu);
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
 }
@@ -301,8 +548,8 @@ h1{
     right:0;
     margin: 0 auto;
     padding: 5px;
-    background: #fff;
-    background: rgba(255, 255, 255, 0.8);
+    background: var(--surface);
+    background: var(--surface-translucent);
 }
 
 .leaflet-header #sonde_detail {
@@ -355,7 +602,7 @@ h1{
 
 /* Add a black background color to the top navigation */
 .topnav {
-  background-color: #333;
+  background-color: var(--nav-bg);
   overflow: hidden;
 }
 
@@ -363,7 +610,7 @@ h1{
 .topnav a {
   float: left;
   display: block;
-  color: #f2f2f2;
+  color: var(--nav-text);
   text-align: center;
   padding: 14px 16px;
   text-decoration: none;
@@ -372,14 +619,14 @@ h1{
 
 /* Change the color of links on hover */
 .topnav a:hover {
-  background-color: #ddd;
-  color: black;
+  background-color: var(--nav-hover-bg);
+  color: var(--nav-hover-text);
 }
 
 /* Add an active class to highlight the current page */
 .topnav a.active {
-  background-color: #04AA6D;
-  color: white;
+  background-color: var(--brand);
+  color: var(--on-brand);
 }
 
 /* Hide the link that should open and close the topnav on small screens */
@@ -387,6 +634,90 @@ h1{
   display: none;
   padding-bottom: 12px;
   padding-top: 11px;
+}
+
+/* Top-right user menu (index.html) -- lives in .header, not .topnav, so its dropdown
+   isn't clipped by the nav's overflow:hidden. */
+.header { position: relative; }
+/* The theme switch (#themeToggle, first child once theme.js mounts it) and the button are one
+   flex row, so they are adjacent by construction regardless of the button's variable width
+   (Login vs. a long username) -- see the width-budget note by .themetoggle-mount below. */
+.usermenu { position: absolute; top: 0; right: 0; display: flex; align-items: center; }
+/* Reserve space at the right of the nav (index.html only) so wrapping tabs never slide
+   under the absolutely-positioned user menu. Reset on mobile, where the tabs collapse
+   into the hamburger and the menu only needs to clear the icon (see media query below). */
+#myTopnav { padding-right: 14em; }
+.usermenu-name {
+  display: inline-block;
+  max-width: 5em;    /* keeps the group (switch + gap + button) inside #myTopnav's 14em
+                        reserve at the worst case (see the width-budget note below) */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usermenu-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--nav-text);
+  font-family: inherit;
+  font-size: 17px;
+  padding: 14px 16px;
+}
+.usermenu-btn:hover { background-color: var(--nav-hover-bg); color: var(--nav-hover-text); }
+.usermenu-icon { display: block; flex: none; }
+/* Caret drawn with borders so it stays crisp and matches the text color (currentColor) */
+.usermenu-caret {
+  width: 0;
+  height: 0;
+  margin-left: 2px;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 0.15s;
+}
+.usermenu.open .usermenu-caret { transform: rotate(180deg); }
+.usermenu-guest .usermenu-caret { display: none; }
+.usermenu-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  min-width: 190px;
+  background: var(--menu-bg);
+  box-shadow: 0 8px 24px var(--shadow-strong);
+  border-radius: 0 0 8px 8px;
+  overflow: hidden;
+  z-index: 1100;
+}
+.usermenu.open .usermenu-dropdown { display: block; }
+.usermenu-dropdown .mi {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--menu-text);
+  font-family: inherit;
+  font-size: 15px;
+}
+.usermenu-dropdown .mi:hover { background-color: var(--brand); color: var(--on-brand); }
+.usermenu-dropdown .mi-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--menu-muted);
+  border-bottom: 1px solid var(--menu-border);
+  white-space: nowrap;
+}
+@media screen and (max-width: 600px) {
+  .usermenu { right: 3.4em; }   /* leave room for the hamburger icon at the far right */
+  #myTopnav { padding-right: 0; }  /* tabs collapse to the hamburger here; no reserve needed */
 }
 
 /* When the screen is less than 600 pixels wide, hide all links, except for the first one ("Home"). Show the link that contains should open and close the topnav (.icon) */
@@ -413,54 +744,495 @@ h1{
   }
 }
 
+/* =========================================================================
+   Form layout -- center & constrain the config/qrg/wifi/users forms into a
+   readable column, and give their tables the same clean look as the Home
+   page status table. Scoped to .content / the forms, so Home, login and the
+   live map are untouched.
+   ========================================================================= */
+/* Center the ENTIRE content as one readable column, so the headings (h2/h3),
+   the table and the form all line up together -- not just the table.
+   Block flow (not flex) so margin:0 auto behaves; .content stays a flex *item*
+   of .wrapper (flex:1) so it still fills height and scrolls. */
+/* .content stays full width and is the SINGLE scroll area (fills remaining height
+   as a flex item of .wrapper; min-height:0 lets it shrink so only it scrolls --
+   no nested iframe + content double scrollbar, and the scrollbar sits at the page
+   edge rather than mid-page). */
+.content {
+  display: block;
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  overflow: auto;
+  padding: 24px 18px 36px;
+  box-sizing: border-box;
+}
+/* Center each top-level block into one readable column, so headings (h2/h3),
+   tables and the form all line up together within the full-width scroll area.
+   width:100% gives every page a consistent column width (otherwise QRG/Data,
+   whose content is short, shrink and look too small next to the dense Config). */
+.content > * {
+  width: 100%;
+  max-width: 820px;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+
+/* Home page: the white panel is the full-width scroll area, so its vertical
+   scrollbar sits at the page's right edge like the other tabs -- a centered
+   max-width box would put the scrollbar mid-screen. The content is centered
+   into a readable column via .system-info > * instead. */
+.system-info {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 28px 18px;
+}
+.system-info > * {
+  width: 100%;
+  max-width: 860px;
+  margin-left: auto;
+  margin-right: auto;
+  box-sizing: border-box;
+}
+.system-info h1 { text-align: center; margin-top: 0; }
+/* Keep long URLs in the license text and long status strings from forcing a
+   horizontal scrollbar: let them wrap within the column instead. */
+.system-info p, .system-info a,
+.status-table td, .status-table th { overflow-wrap: anywhere; }
+/* Table fills the centered column; styled like the Home status table.
+   margin auto centers it -- needed to override table.stat's margin-left/right:0,
+   which would otherwise left-align the Data (status) tables. */
+.content table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-left: auto;
+  margin-right: auto;
+}
+.content th, .content td {
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;   /* center labels against their (taller) input fields */
+}
+.content th { background-color: var(--bg-alt); font-weight: bold; color: var(--text-strong); }
+/* Right-size the Value column of the 2-column config table so each label sits
+   next to its input instead of at the opposite edge of the screen */
+.cfgpanel td:last-child { width: 220px; }
+/* Inputs in a table cell fill the cell; fixed-size inputs keep their width */
+.content td input[type="text"],
+.content td input[type="password"],
+.content td select { width: 100%; box-sizing: border-box; }
+.content td input[size] { width: auto; }
+/* Consistent, modern field styling across every form (config/qrg/wifi/users/login):
+   subtle border, rounded corners, comfortable padding and a brand-green focus ring. */
+.content input[type="text"],
+.content input[type="password"],
+.content input[type="number"],
+.content select,
+.content textarea,
+#addForm input[type="text"],
+#addForm input[type="password"],
+.system-info input[type="text"],
+.system-info input[type="password"] {
+  padding: 7px 9px;
+  border: 1px solid var(--field-border);
+  border-radius: 5px;
+  font-size: 14px;
+  box-sizing: border-box;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.content input[type="text"]:focus,
+.content input[type="password"]:focus,
+.content input[type="number"]:focus,
+.content select:focus,
+.content textarea:focus,
+#addForm input:focus,
+.system-info input:focus,
+.system-info select:focus {
+  outline: none;
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-ring);
+}
+/* Selects: replace the native control with a custom caret so they match the
+   text inputs (same height/border/radius) and render identically across
+   browsers and in dark mode. */
+.content select,
+.system-info select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px;
+  cursor: pointer;
+}
+/* the users "Level" dropdown sits beside the 16em inputs -- match their width */
+#addForm select { width: 16em; max-width: 100%; }
+/* The open option list inherits colors from the styled control, which looks odd;
+   pin clean colors so the dropdown reads well in light mode. */
+.content select option,
+.system-info select option {
+  background-color: var(--surface);
+  color: var(--option-text);
+}
+
+/* Checkboxes (e.g. the config "Touch" toggles) adopt the brand colour. */
+.content input[type="checkbox"],
+#addForm input[type="checkbox"] {
+  accent-color: var(--brand);
+  width: 16px; height: 16px;
+  vertical-align: middle;
+  cursor: pointer;
+}
+/* The hand-written Add/update user form (users.html) and the login form. */
+#addForm { max-width: 820px; margin: 0 auto; }
+#addForm input[type="text"], #addForm input[type="password"],
+#loginForm input[type="text"], #loginForm input[type="password"] { width: 16em; max-width: 100%; }
+
+/* Control page: a tidy centered stack of buttons. The clamped font-size keeps them
+   inside the centered column instead of overflowing and being clipped. */
+.content .ctlbtn {
+  display: block;
+  width: 100%;
+  max-width: 440px;
+  box-sizing: border-box;
+  margin: 10px auto;
+  padding: 12px 18px;
+  font-size: clamp(15px, 3.4vh, 18px);
+  font-weight: 600;
+  text-align: center;
+  color: var(--on-brand);
+  background-color: var(--brand);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px var(--shadow);
+  transition: background-color 0.15s, transform 0.03s;
+}
+.content .ctlbtn:hover { background-color: var(--brand-hover); }
+.content .ctlbtn:active { transform: translateY(1px); }
+/* Destructive actions stand out in red */
+.content .ctlbtn[name="format"], .content .ctlbtn[name="reboot"] { background-color: var(--danger); }
+.content .ctlbtn[name="format"]:hover, .content .ctlbtn[name="reboot"]:hover { background-color: var(--danger-hover); }
+/* Keypresses with no function on the current screen are greyed out and non-clickable */
+.content .ctlbtn:disabled,
+.content .ctlbtn:disabled:hover {
+  background-color: var(--disabled-btn);
+  color: var(--disabled-btn-text);
+  cursor: not-allowed;
+  box-shadow: none;
+  opacity: 0.6;
+}
+
+/* =========================================================================
+   Dark theme. The token list appears TWICE on purpose:
+     1. [data-theme="dark"]                  -- what theme.js stamps (JS path)
+     2. @media dark + :root:not([data-theme]) -- no-JS fallback, so the UI is
+        still dark for a dark-OS visitor with JavaScript disabled.
+   An explicit [data-theme="light"] therefore always wins over the OS, because
+   the media-query block only matches when NO attribute is present.
+   KEEP THE TWO LISTS IDENTICAL.
+   ========================================================================= */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #1b1f23;
+  --bg-alt: #22272c;
+  --surface: #22272c;
+  --surface-translucent: rgba(34, 39, 44, 0.85);
+  --table-bg: #22272c;
+  --table-caption-bg: #2f353b;
+  --table-sfreq-bg: #2f353b;
+
+  --text: #e6e6e6;
+  --body-text: #e6e6e6;
+  --text-strong: #fff;
+  --text-body: #d6d6d6;
+  --text-secondary: #bdbdbd;
+  --text-muted: #a0a7ad;
+  --text-faint: #868d94;
+  --option-text: #fff;
+  --heading: #6ea8fe;
+  --link: #7ab8ff;
+
+  --border: #3a4046;
+  --border-soft: #2f353b;
+  --border-strong: #4a5158;
+  --border-input: #4a5158;
+  --border-hairline: #2f353b;
+  --table-border: #4a5158;
+  --panel-hover-bg: #3a4046;
+
+  --field-bg: #2b3137;
+  --field-border: #4a5158;
+  --field-text: #e6e6e6;
+
+  --brand: #06a86e;
+  --brand-hover: #05c07b;
+  --brand-active: #04AA6D;
+  --brand-disabled: #3f5a4e;
+  --brand-text: #35d39a;
+  --brand-ring: rgba(5, 192, 123, 0.25);
+  --brand-ring-strong: rgba(5, 192, 123, 0.45);
+  --on-brand: #fff;
+
+  --danger: #d43b3b;
+  --danger-hover: #b52d2d;
+  --danger-text: #ff8a8a;
+
+  --neutral-btn: #6c757d;
+  --neutral-btn-hover: #5c646b;
+  --neutral-btn-active: #4d545a;
+  --neutral-ring: rgba(140, 150, 160, 0.5);
+  --disabled-btn: #414851;
+  --disabled-btn-text: #8d949b;
+
+  --nav-bg: #22272c;
+  --nav-text: #e6e6e6;
+  --nav-icon: #e6e6e6;
+  --nav-hover-bg: #333a41;
+  --nav-hover-text: #fff;
+  --menu-bg: #2b3137;
+  --menu-text: #e6e6e6;
+  --menu-muted: #9aa1a8;
+  --menu-border: #3a4046;
+
+  --shadow: rgba(0, 0, 0, 0.5);
+  --shadow-strong: rgba(0, 0, 0, 0.6);
+  --shadow-menu: rgba(0, 0, 0, 0.7);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --spinner-track: #3a4046;
+  --accent-info: #6ea8fe;
+}
+
 @media (prefers-color-scheme: dark) {
-  body {
-    background-color: #333;
+  :root:not([data-theme]) {
+    color-scheme: dark;
+
+    --bg: #1b1f23;
+    --bg-alt: #22272c;
+    --surface: #22272c;
+    --surface-translucent: rgba(34, 39, 44, 0.85);
+    --table-bg: #22272c;
+    --table-caption-bg: #2f353b;
+    --table-sfreq-bg: #2f353b;
+
+    --text: #e6e6e6;
+    --body-text: #e6e6e6;
+    --text-strong: #fff;
+    --text-body: #d6d6d6;
+    --text-secondary: #bdbdbd;
+    --text-muted: #a0a7ad;
+    --text-faint: #868d94;
+    --option-text: #fff;
+    --heading: #6ea8fe;
+    --link: #7ab8ff;
+
+    --border: #3a4046;
+    --border-soft: #2f353b;
+    --border-strong: #4a5158;
+    --border-input: #4a5158;
+    --border-hairline: #2f353b;
+    --table-border: #4a5158;
+    --panel-hover-bg: #3a4046;
+
+    --field-bg: #2b3137;
+    --field-border: #4a5158;
+    --field-text: #e6e6e6;
+
+    --brand: #06a86e;
+    --brand-hover: #05c07b;
+    --brand-active: #04AA6D;
+    --brand-disabled: #3f5a4e;
+    --brand-text: #35d39a;
+    --brand-ring: rgba(5, 192, 123, 0.25);
+    --brand-ring-strong: rgba(5, 192, 123, 0.45);
+    --on-brand: #fff;
+
+    --danger: #d43b3b;
+    --danger-hover: #b52d2d;
+    --danger-text: #ff8a8a;
+
+    --neutral-btn: #6c757d;
+    --neutral-btn-hover: #5c646b;
+    --neutral-btn-active: #4d545a;
+    --neutral-ring: rgba(140, 150, 160, 0.5);
+    --disabled-btn: #414851;
+    --disabled-btn-text: #8d949b;
+
+    --nav-bg: #22272c;
+    --nav-text: #e6e6e6;
+    --nav-icon: #e6e6e6;
+    --nav-hover-bg: #333a41;
+    --nav-hover-text: #fff;
+    --menu-bg: #2b3137;
+    --menu-text: #e6e6e6;
+    --menu-muted: #9aa1a8;
+    --menu-border: #3a4046;
+
+    --shadow: rgba(0, 0, 0, 0.5);
+    --shadow-strong: rgba(0, 0, 0, 0.6);
+    --shadow-menu: rgba(0, 0, 0, 0.7);
+    --overlay: rgba(0, 0, 0, 0.6);
+    --spinner-track: #3a4046;
+    --accent-info: #6ea8fe;
   }
-  h1{
-    color: #3378f6;
-  } 
-  h2{
-    color: white;
+}
+
+body, html { color: var(--body-text); }
+
+/* Fields and the legacy tables need explicit token-driven colors: their light
+   appearance otherwise comes from browser defaults, which flip in dark mode. */
+.content input[type="text"], .content input[type="password"],
+.content input[type="number"], .content select, .content textarea,
+#addForm input[type="text"], #addForm input[type="password"],
+#loginForm input[type="text"], #loginForm input[type="password"],
+.system-info input[type="text"], .system-info input[type="password"] {
+  background-color: var(--field-bg);
+  color: var(--field-text);
+}
+.tci { background-color: var(--bg); }
+
+/* Generic content-link colour. Must stay dark-only: unconditional, it beats
+   .topnav a on source order and makes the light-mode nav tabs illegible. */
+:root[data-theme="dark"] a:link,
+:root[data-theme="dark"] a:visited { color: var(--link); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) a:link,
+  :root:not([data-theme]) a:visited { color: var(--link); }
+}
+/* Chrome anchors are not content links: pin them in every theme so the rule above
+   cannot recolour them. Same specificity, later in the file, so these win. */
+:root .topnav a:link,
+:root .topnav a:visited { color: var(--nav-text); }
+:root .topnav a.active:link,
+:root .topnav a.active:visited { color: var(--on-brand); }
+:root a.iconbtn:link,
+:root a.iconbtn:visited { color: var(--on-brand); }
+:root .link-buttons a.button:link,
+:root .link-buttons a.button:visited { color: var(--on-brand); }
+/* The chrome pins above are (0,3,1)/(0,4,1), which beats .topnav a:hover's (0,2,1) on
+   color -- without this, hovering a tab still changes background-color but the text
+   stays --nav-text (~1.1:1 against --nav-hover-bg, unreadable). This rule ties the
+   plain-tab pin at (0,3,1) and wins by coming after it in source order; the active-tab
+   pin is (0,4,1) and still beats this on hover. */
+:root .topnav a:hover { color: var(--nav-hover-text); }
+
+/* Leaflet chrome, styled unconditionally from the theme tokens: without these rules dark
+   mode leaves white zoom buttons and a white popup shell around an already-dark popup
+   table. In light mode the popup wrapper/tip tokens (#fff bg / #333 text) match Leaflet's
+   own defaults, so those two rules are a no-op there. .leaflet-bar a is NOT a no-op in
+   light: Leaflet's own zoom-glyph color is black and --text is #333, so this rule
+   deliberately moves the glyphs onto the site's body-text color in light mode too. Both
+   rules matter most in dark, where the tokens diverge furthest from Leaflet's defaults.
+   !important is required, not cosmetic: livemap.html loads leaflet.css from the CDN AFTER
+   style.css (livemap.html:7-8), so on equal specificity Leaflet would win. */
+.leaflet-bar a {
+  background-color: var(--surface) !important;
+  color: var(--text) !important;
+}
+.leaflet-popup-content-wrapper, .leaflet-popup-tip {
+  background: var(--surface) !important;
+  color: var(--text) !important;
+}
+
+/* The select caret is a data-URI SVG with a baked-in stroke color; a data: URL
+   cannot reference var(). Keep one rule per theme, switched by the same
+   selectors used for the tokens above. */
+:root[data-theme="dark"] .content select,
+:root[data-theme="dark"] .system-info select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ccc' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .content select,
+  :root:not([data-theme]) .system-info select {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23ccc' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   }
-  .system-info p {
-	  color: #bdbdbd;
-  }
-  .status-table th {
-	  color: black;
-  }
-  table, th, td, .save, a.active {
-    color: white;
-    border: 1px solid grey;
-    border-collapse: collapse;
-    background-color: #333;
-  }
-  input, select, .tci, .warning {
-    color: white;
-    background-color: #333;
-  }
-  a:link, a:visited {
-    color: #D3D3D3;
-  }
-  .topnav, td#sfreq {
-    background-color: grey;
-  }
-  .topnav a:visited {
-    color: white;
-  }
-  .ctlbtn {
-    color: white;
-    background-color: grey;
-  }
-  .leaflet-center {
-    color: white;
-    background-color: grey;
-  }
-  .leaflet-bar a {
-    background-color: grey !important;
-  }
-  .leaflet-popup-content-wrapper, .leaflet-popup-tip {
-    color: white !important;
-    background: grey !important;
-  }
+}
+
+/* Theme switch (theme.js): a single icon button, sun in light mode / moon in dark mode,
+   click flips the theme. On index.html it is the first child of .usermenu (theme.js mounts
+   it into #themeToggle) -- switch and button are one flex row, so they sit adjacent by
+   construction regardless of the button's variable width (Login vs. a long username); a
+   fixed offset could not track a variable-width neighbour. On standalone pages it floats
+   top-right instead (.themetoggle-floating); livemap.html overrides that further since
+   even that corner is occupied there (see the relocation code in livemap.js).
+
+   The one number that matters here is #myTopnav's reserve (14em, above) against this flex
+   group's own worst-case width, so wrapping tabs never slide under it:
+     .usermenu-btn chrome = 74px (padding 32 + icon 18 + two 7px gaps + caret 8 + margin 2)
+     .usermenu-name max-width 5em @ 17px = 85px       =>  button is 159px wide
+     .themetoggle-mount margin-right 10px + switch (18 icon + 12 padding + 2 border) 32px = 42px
+     worst case: 159 + 42 = 201px = 12.56em @ 16px root  <  14em reserve (~1.44em / 23px spare)
+   Do not widen .usermenu-name past 5em without re-checking this: 6em would add ~17px, still
+   inside 14em, but re-verify rather than assume. On mobile, .usermenu itself shifts to
+   right: 3.4em to clear the hamburger; the group's own width is unchanged, so it still must
+   not grow wide enough to reach the single visible .topnav a.active tab ("Home", ~77px) on
+   a 360px phone. */
+.themetoggle-mount {
+  display: flex;
+  align-items: center;
+  margin-right: 10px;   /* gap to the user-menu button */
+}
+/* Pages with a nav but no user menu (upd.html, login.html): the mount is a direct child of
+   .header and anchors itself at the right edge. On index.html the mount instead sits inside
+   .usermenu as a flex sibling, so the child combinator keeps these two cases apart. */
+.header > .themetoggle-mount {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  /* 10px + the button's own 6px padding = a 16px optical inset for the icon, matching the
+     16px horizontal gutter of `.topnav a`'s padding so it lines up with the nav's text. */
+  right: 10px;
+  margin-right: 0;
+}
+/* Single icon button (sun in light mode, moon in dark mode; click flips the theme). Base
+   styling suits a page/map surface -- this is what .themetoggle-floating (standalone pages)
+   and the Leaflet-control instance on livemap.html actually sit against, matching the
+   .usermenu-btn idiom for the icon-button shape itself. No --brand anywhere: green already
+   means "active tab" in the navbar, so a green icon there would dilute that signal -- see
+   the navbar override below, which is the one host this base isn't meant for. */
+.themetoggle {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 6px;
+  cursor: pointer;
+}
+.themetoggle-icon { display: block; }
+/* Both icons stay in the DOM always; visibility is a pure function of is-dark (set by
+   sync() in theme.js) so nothing needs to re-render on toggle. The icon shown is the
+   ACTION a click performs, not the current state (conventional for an icon button): light
+   mode shows the moon ("click for dark"), dark mode shows the sun ("click for light"). This
+   agrees with the dynamic title/aria-label, which also name the action. */
+.themetoggle .themetoggle-sun { display: none; }
+.themetoggle.is-dark .themetoggle-moon { display: none; }
+.themetoggle.is-dark .themetoggle-sun { display: block; }
+.themetoggle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--brand-ring);
+}
+/* In the navbar the switch is chrome, not a form control: the bar is dark in BOTH themes,
+   so it matches .usermenu-btn's own idiom exactly -- transparent, no border, nav-text --
+   rather than the standalone surface/border affordance above. */
+.themetoggle-mount .themetoggle {
+  border: none;
+  background: transparent;
+  color: var(--nav-text);
+}
+.themetoggle-mount .themetoggle:hover { background-color: var(--nav-hover-bg); color: var(--nav-hover-text); }
+.themetoggle-floating {
+  position: fixed;
+  right: 14px;
+  top: 14px;              /* NOT bottom: Leaflet puts its attribution control bottom-right on
+                             livemap.html/map.html, and its zoom control top-left, so top-right
+                             is the one free corner on the pages that will use this fallback. */
+  z-index: 1050;
+  box-shadow: 0 2px 8px var(--shadow-strong);
 }

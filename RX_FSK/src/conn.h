@@ -39,6 +39,14 @@ public:
 	/* Called approx 1x / second* */
 	virtual void updateStation( PosInfo *pi ) = 0;
 
+	/* Offline upload cache hooks (default = opted out, for local/non-network sinks). */
+	/* Return true when this connector's link is up and able to accept a frame now. */
+	virtual bool replayReady() { return false; }
+	/* Called once per tick when the drain delivered no frame (housekeeping/flush). */
+	virtual void idleTick() {}
+	/* Next cache seq this connector still owes; advanced by drainConnectors(). */
+	uint32_t replayCursor = 0;
+
 	///* Called whenever frequency changes (QRG details are in sondeList[nextSonde] */
 	//virtual void updateQRG( int nextSonde ) = 0;
 

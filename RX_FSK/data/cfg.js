@@ -1,6 +1,6 @@
 var cfgs = [
 [ "", "General configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/General-configuration" ],
-[ "wifi", "Wifi mode (0=off, 1=client, 2=AP, 3=client or AP, 4=client-noscan)" ],
+[ "wifi", "Wifi mode (0=off, 1=client, 2=AP, 3=client or AP, 4=client-noscan, 5=client or AP+retry)" ],
 [ "mdnsname", "Network mDNS name"],
 [ "ephftp", "FTP server for ephemeris data (RS92 decoder)"],
 [ "debug", "Debug level (0=err/1=warn/2=info/3=all;+10=color)" ],
@@ -9,6 +9,7 @@ var cfgs = [
 [ "rxlon", "Receiver fixed longitude"],
 [ "rxalt", "Receiver fixed altitude"],
 [ "b2mute", "Button 2/medium press mutes LED/Buzzer (minutes)"],
+[ "cachesize", "Offline upload cache: buffered frames for backfill after a network/WiFi outage (0=disabled, default 120)"],
 [ "", "OLED/TFT display configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/Display-configuration" ],
 [ "screenfile", "Screen config (0=automatic; 1-5=predefined; other=custom)" ],
 [ "display", "Display screens (scan, default, ...)" ],
@@ -18,12 +19,28 @@ var cfgs = [
 [ "tft_orient", "TFT orientation (0/1/2/3), OLED flip: 3"],
 [ "", "Spectrum display configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/Spectrum-configuration" ],
 [ "spectrum", "Show spectrum on start (-1=no, 0=forever, >0=time [sec])" ],
-[ "startfreq", "Start frequency (MHz, default 400)" ],
+[ "startfreq", "Start frequency (MHz, decimals allowed e.g. 400.2; sweep covers this +6 MHz; default 400)" ],
 [ "channelbw", "Bandwidth (kHz)" ],
 [ "marker", "Spectrum MHz marker" ],   // maybe remove, assume always ==1?
 [ "noisefloor", "Spectrum noisefloor" ],
+[ "scanplotint", "Web scan-plot idle-sweep interval [sec] (0=disabled)" ],
+[ "scan_smooth", "Scan RSSI averaging 0..7 (samples=2^(n+1)); -1=display default" ],
+[ "scan_addwait", "Scan extra per-bin settle time [us]; -1=display default" ],
+[ "scan_iter", "Scan sweeps per scan (1..20, default 6; more = catch periodic signals)" ],
+[ "", "Auto-scan (peak detection; ignores the frequency list when enabled)" ],
+[ "autoscan_enable", "Auto-scan enable (1=find sondes on spectrum peaks, 0=use frequency list)" ],
+[ "autoscan_snr", "Auto-scan: min SNR above noise floor [dB] (default 10)" ],
+[ "autoscan_mindist", "Auto-scan: min distance between peaks [Hz] (default 1000)" ],
+[ "autoscan_quant", "Auto-scan: quantize peaks to [Hz] (default 10000)" ],
+[ "autoscan_maxpeaks", "Auto-scan: max peaks per sweep (default 10)" ],
+[ "autoscan_dwell", "Auto-scan: detection time per peak [sec], split across types (default 12)" ],
+[ "autoscan_typedwell", "Auto-scan: fixed decode time per type [ms]; 0=derive from dwell" ],
+[ "autoscan_qrgfirst", "Auto-scan: try active frequency-list channels (configured freq+type) before spectrum peaks (default 1)" ],
+[ "autoscan_exclude", "Auto-scan: comma-separated MHz to ignore as noise/birdies, e.g. 400.01,400.11 (empty=none)" ],
 [ "", "Receiver configuration", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/Receiver-configuration" ],
 [ "freqofs", "RX frequency offset (Hz)"],
+[ "lnaboost", "LNA current boost (0=default, 1=150%; useful without external LNA)"],
+[ "lnagain", "External LNA gain in dB (>=0), subtracted from the reported RSSI (0=no correction)"],
 [ "rs41.agcbw", "RS41 AGC bandwidth"],
 [ "rs41.rxbw", "RS41 RX bandwidth"],
 [ "rs92.rxbw", "RS92 RX (and AGC) bandwidth"],
@@ -67,6 +84,13 @@ var cfgs = [
 [ "ss.active", "Sondeseeker active (0=disabled, 1=active)"],
 [ "ss.host", "Sondeseeker UDP host"],
 [ "ss.port", "Sondeseeker UDP port"],
+[ "", "Sonde notifications (ntfy)", "" ],
+[ "notify.active", "ntfy alerts: 0=disabled, 1=sonde landing near me, 2=new sonde detected, 3=both"],
+[ "notify.dist", "Landing alert when sonde is within this horizontal distance [km]"],
+[ "notify.alt", "Landing alert only when sonde altitude is below this [km]"],
+[ "notify.server", "ntfy server base URL, HTTP only - no TLS in firmware (e.g. http://ntfy.sh)"],
+[ "notify.topic", "ntfy topic to subscribe to (auto-generated random topic on first boot if left empty; sent over plain HTTP, so anyone on the path can read it)"],
+[ "notify.token", "ntfy access token for protected topics (optional)"],
 [ "", "SondeHub settings", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/SondeHub-settings"],
 [ "sondehub.active", "SondeHub reporting (0=disabled, 1=active)"],
 [ "sondehub.chase", "SondeHub location reporting (0=off, 1=fixed, 2=chase/GPS, 3=auto)"],
@@ -87,6 +111,10 @@ var cfgs = [
 [ "sd.sync", "SD card sync interval [s]" ],
 [ "sd.name", "SD card naming (0=flat, 1=YYMM folders)" ],
 [ "sd.speed", "SD card SPI speed (Hz, 0=default, e.g. 4000000, 8000000, 16000000)" ],
+[ "", "Serial position output (Serial1 / UART1, requires reboot)"],
+[ "serialout.format", "Serial output format (0=off, 1=NMEA, 2=JSON, 3=CSV, 4=PAYLOAD_SUMMARY)"],
+[ "serialout.txd", "Serial output TX pin (-1 to disable; must be free & output-capable, not 6-11/34-39)"],
+[ "serialout.baud", "Serial output baud rate (e.g. 9600)"],
 [ "", "Hardware configuration (requires reboot)", "https://github.com/dl9rdz/rdz_ttgo_sonde/wiki/Hardware-configuration"],
 [ "disptype", "Display type (0=OLED/SSD1306, 1=ILI9225, 2=OLED/SH1106, 3=ILI9341, 4=ILI9342, 5=ST7789, 6=ST7796)"],
 [ "oled_sda", "OLED SDA/TFT SDA"],
@@ -124,7 +152,7 @@ function isAllowedDup(nameA, nameB) {
    return false;
 }
 // Function to check for duplicate pins
-function checkForDuplicates() {
+function checkForDuplicates(form) {
     // Create an object to store values and their associated descriptions and names
     var valuesMap = {};
     var duplicates = [];
@@ -165,14 +193,15 @@ function checkForDuplicates() {
             message += "Pin " + duplicates[j].value + " in '" + duplicates[j].descA + "' and '" + duplicates[j].descB + "'\n";
         }
 
-        // Show a confirm popup to let the user decide whether to submit the form
-        if (!confirm(message + "\nDo you want to submit the form anyway?")) {
-            // If the user chooses to cancel, prevent the form submission
-            return false;
-        }
+        // Confirm asynchronously: block this submit, and re-submit programmatically if the
+        // user accepts. form.submit() does not re-fire onsubmit, so there is no loop.
+        showConfirm(message + "\nDo you want to submit the form anyway?").then(function(ok) {
+            if (ok) form.submit();
+        });
+        return false;
     }
 
-    // Allow form submission
+    // No duplicates: allow the form submission to proceed.
     return true;
 }
 

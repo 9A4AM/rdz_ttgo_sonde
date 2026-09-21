@@ -557,6 +557,11 @@ int16_t SX1278FSK::getRSSI()
 	Serial.print(RSSI);
 	Serial.println(F(" ##"));
 #endif
+	// Correct for an external LNA: the SX1278 measures the signal after the LNA has
+	// amplified it, so subtract the configured gain to report the antenna-level RSSI.
+	// rssi is in half-dB units (dBm = -rssi/2), so adding 2*gain lowers the reported
+	// dBm by 'gain'. Negative gains are not allowed (treated as 0 = no correction).
+	if (sonde.config.lnagain > 0) RSSI += 2 * sonde.config.lnagain;
 	return RSSI;
 }
 

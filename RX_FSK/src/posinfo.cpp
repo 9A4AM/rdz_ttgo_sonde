@@ -122,8 +122,9 @@ void gpsTask(void *parameter) {
             totalNMEA++;
             gotNMEA = 1;
         }
-        if(strncmp(nmeastring+3, "GGA", 3)==0 || strncmp(nmeastring+3, "RMC", 3)==0) {
+        if(strlen(nmeastring) >= 6 && (strncmp(nmeastring+3, "GGA", 3)==0 || strncmp(nmeastring+3, "RMC", 3)==0)) {
             strncpy(lastnmea, nmeastring, 100);
+            lastnmea[100] = 0;  // strncpy does not terminate when source is >= 100 chars
 	    //Serial.printf("GPS: last position nmea: %s\n", lastnmea);
  	}
  	else  {

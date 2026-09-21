@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rdzSonde Scan Plot</title>
+<style>
+  html, body { height:100%; }
+  body { font-family: sans-serif; margin: 0; background:#000; color:#eee;
+         display:flex; flex-direction:column; }
+  .bar { padding: 8px 12px; background:#1a1a1a; display:flex; gap:16px; align-items:center; flex-wrap:wrap; flex:none; }
+  .bar a { color:#6cf; text-decoration:none; }
+  #banner { padding:6px 12px; background:#553; color:#ffd; display:none; flex:none; }
+  #head { padding:6px 12px 0; flex:none; }
+  #head h2 { margin:0; font-size:1.05em; }
+  #stamp { font-size:0.9em; color:#bbb; }
+  #wrap { padding:4px 12px 12px; flex:1 1 auto; min-height:0; }
+  /* JS owns all gestures (pinch = zoom into frequency, drag = pan, tap =
+     crosshair), so disable the browser's own touch scrolling/zooming here */
+  canvas { width:100%; height:100%; background:#000; display:block; touch-action: none; }
+  .muted { color:#999; font-size:0.85em; }
+</style>
+</head>
+<body>
+  <div class="bar">
+    <a href="/">&larr; Home</a>
+    <b>Spectrum</b>
+    <span id="info" class="muted"></span>
+  </div>
+  <div id="banner"></div>
+  <div id="head">
+    <h2>&#9660; Scan Plot</h2>
+    <div id="stamp">Latest Scan: &mdash;</div>
+  </div>
+  <div id="wrap">
+    <canvas id="plot" width="1200" height="260"></canvas>
+  </div>
+
+<script>
+const POLL_MS = 3000;      // how often to poll for a fresh scan
+const THR_MARGIN = 0.15;   // noise-reference line = median + THR_MARGIN*(max-median)
+let lastSeq = -1;
+let cv = document.getElementById('plot');
+let ctx = cv.getContext('2d', { willReadFrequently: true });
+let info = document.getElementById('info');
+let banner = document.getElementById('banner');
+let stamp = document.getElementById('stamp');
+let lastJson = null;
+let plot = null;           // cached geometry + pixel snapshot for the crosshair overlay
+let view = null;           // visible window {lo,hi} in bin-index space; null = full band
+
+function median(arr) {
+  let s = [...arr].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
+function draw() {
+  let j = lastJson;
+  if (!j || !j.data || j.n < 2) return;
+  let n = j.n, data = j.data, start = j.startfreq, step = j.step;
+
+  // match the backing store to the on-screen size so the trace is
+  // rendered at native resolution instead of being scaled (zoomed/blurred)
+  let dpr = window.devicePixelRatio || 1;
+  let W = Math.round(cv.clientWidth), H = Math.round(cv.clientHeight);
+  if (cv.width !== W * dpr || cv.height !== H * dpr) {
+    cv.width = W * dpr; cv.height = H * dpr;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);   // draw in CSS pixels
+  const ML = 48, MR = 12, MT = 12, MB = 24;        // margins
+  let pw = W - ML - MR, ph = H - MT - MB;
+
+  // configured noise floor (dBm); drawn as a reference line if present
+  let nf = (typeof j.noisefloor === 'number') ? j.noisefloor : null;
+
+  // visible window in bin-index space; null = full band. Clamp here so a stale
+  // window (e.g. n shrank under a long-lived tab) can never read past the data.
+  const MINSPAN = Math.min(n - 1, 8);
+  let lo = view ? view.lo : 0, hi = view ? view.hi : n - 1;
+  lo = Math.max(0, Math.min(lo, n - 1 - MINSPAN));
+  hi = Math.min(n - 1, Math.max(hi, lo + MINSPAN));
+  view = (lo <= 0 && hi >= n - 1) ? null : { lo, hi };   // normalise full -> null
+  let span = hi - lo;
+  let xFor = i => ML + ((i - lo) / span) * pw;
+
+  // y range auto-scaled to the VISIBLE bins (so zooming re-fits the dBm scale),
+  // plus the noise floor so its line stays on-plot; padded to a 5 dB grid
+  let i0 = Math.max(0, Math.floor(lo)), i1 = Math.min(n - 1, Math.ceil(hi));
+  let dmin = Infinity, dmax = -Infinity;
+  for (let i = i0; i <= i1; i++) {
+    if (data[i] < dmin) dmin = data[i];
+    if (data[i] > dmax) dmax = data[i];
+  }
+  if (nf !== null) { dmin = Math.min(dmin, nf); dmax = Math.max(dmax, nf); }
+  let ymin = Math.floor((dmin - 2) / 5) * 5;
+  let ymax = Math.ceil((dmax + 2) / 5) * 5;
+  // guarantee at least 4 labels (>= 3 grid intervals of 5 dB) by expanding the
+  // range outward — top (signal side) first — when the visible data spans too
+  // little, so we add headroom above rather than dead space below the noise floor
+  while ((ymax - ymin) < 15) {
+    ymax += 5;
+    if ((ymax - ymin) < 15) ymin -= 5;
+  }
+  let yFor = v => MT + (1 - (v - ymin) / (ymax - ymin)) * ph;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // grid + axes
+  ctx.strokeStyle = '#333'; ctx.fillStyle = '#aaa';
+  ctx.lineWidth = 1; ctx.font = '11px sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  for (let v = ymin; v <= ymax; v += 5) {
+    let y = yFor(v);
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke();
+    ctx.fillText(v.toString(), ML - 5, y);
+  }
+  ctx.textBaseline = 'top'; ctx.textAlign = 'center';
+  // tick spacing adapts to the visible span so the axis stays labeled when zoomed
+  let fLo = start + lo * step, fHi = start + hi * step, spanMHz = span * step;
+  let tickMHz = spanMHz > 4 ? 1 : spanMHz > 1.5 ? 0.5 : spanMHz > 0.6 ? 0.2 : 0.1;
+  let dec = tickMHz < 1 ? 1 : 0;
+  for (let f = Math.ceil(fLo / tickMHz - 1e-9) * tickMHz; f <= fHi + 1e-9; f += tickMHz) {
+    let x = xFor((f - start) / step);
+    ctx.strokeStyle = '#222';
+    ctx.beginPath(); ctx.moveTo(x, MT); ctx.lineTo(x, MT + ph); ctx.stroke();
+    ctx.fillStyle = '#aaa';
+    ctx.fillText(f.toFixed(dec), x, MT + ph + 4);
+  }
+  // axis labels
+  ctx.save();
+  ctx.fillStyle = '#888'; ctx.textAlign = 'center';
+  ctx.fillText('Frequency (MHz)', ML + pw / 2, H - 11);
+  ctx.translate(11, MT + ph / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Power (dBm)', 0, 0);
+  ctx.restore();
+
+  // threshold (gray dotted), labeled on the right to keep it clear of the
+  // noise-floor label on the left
+  let med = median(data.slice(i0, i1 + 1)), mx = dmax;
+  let thr = med + THR_MARGIN * (mx - med);
+  ctx.strokeStyle = '#888'; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(ML, yFor(thr)); ctx.lineTo(W - MR, yFor(thr)); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#888'; ctx.font = '11px sans-serif';
+  ctx.textBaseline = 'bottom'; ctx.textAlign = 'right';
+  ctx.fillText('signal threshold ' + thr.toFixed(0) + ' dBm', W - MR - 4, yFor(thr) - 2);
+
+  // configured noise floor (orange dashed), labeled to tell it from the threshold
+  if (nf !== null) {
+    let y = yFor(nf);
+    ctx.strokeStyle = '#e8923a'; ctx.setLineDash([6, 3]);
+    ctx.beginPath(); ctx.moveTo(ML, y); ctx.lineTo(W - MR, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#e8923a'; ctx.font = '11px sans-serif';
+    ctx.textBaseline = 'bottom'; ctx.textAlign = 'left';
+    ctx.fillText('noise floor ' + nf + ' dBm', ML + 4, y - 2);
+  }
+
+  // trace — 1.5px so steep (near-vertical) segments don't anti-alias to a
+  // paler blue than the flatter runs; round joins keep the peaks clean.
+  // Clipped to the plot rect so off-window bins don't spill past the axes when zoomed.
+  ctx.strokeStyle = '#3a7bd5'; ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.save();
+  ctx.beginPath(); ctx.rect(ML, MT, pw, ph); ctx.clip();
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    let x = xFor(i), y = yFor(data[i]);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // zoom indicator + reset hint (only while zoomed in)
+  if (view) {
+    ctx.fillStyle = '#777'; ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText('zoom ' + ((n - 1) / span).toFixed(1) + '×  ·  double-tap / double-click to reset',
+                 ML + pw / 2, MT + 2);
+  }
+
+  // cache geometry + a clean snapshot so the mouse crosshair can be drawn
+  // (and erased) without re-rendering the whole plot on every mousemove
+  plot = {
+    ML, MR, MT, MB, pw, ph, W, H, n, start, step, data, lo, hi,
+    xFor, yFor,
+    snapshot: ctx.getImageData(0, 0, cv.width, cv.height)
+  };
+}
+
+// extract client coords from either a mouse event or a touch event, so the
+// crosshair works the same whether driven by hover (desktop) or a finger drag
+// (mobile, which dispatches no hover events)
+function pointFrom(ev) {
+  if (ev.touches && ev.touches.length) return ev.touches[0];
+  if (ev.changedTouches && ev.changedTouches.length) return ev.changedTouches[0];
+  return ev;
+}
+
+// draw a vertical/horizontal crosshair through the data point nearest the
+// cursor/finger, with a label showing the exact frequency and power at that point
+function drawCrosshair(ev) {
+  if (!plot) return;
+  let p = plot;
+  let pt = pointFrom(ev);
+  let rect = cv.getBoundingClientRect();
+  // map the client coords to CSS pixels of the canvas backing store
+  let mx = (pt.clientX - rect.left) * (cv.clientWidth / rect.width);
+  let my = (pt.clientY - rect.top) * (cv.clientHeight / rect.height);
+
+  ctx.putImageData(p.snapshot, 0, 0);   // restore the clean plot
+
+  // outside the plot area -> just leave the clean plot showing
+  if (mx < p.ML || mx > p.W - p.MR || my < p.MT || my > p.MT + p.ph) return;
+
+  // snap to the nearest bin (within the visible window)
+  let i = Math.round(p.lo + (mx - p.ML) / p.pw * (p.hi - p.lo));
+  if (i < 0) i = 0; else if (i > p.n - 1) i = p.n - 1;
+  let x = p.xFor(i), y = p.yFor(p.data[i]);
+  let freq = p.start + i * p.step;
+  let pwr = p.data[i];
+
+  // crosshair: full column + row through the point
+  ctx.strokeStyle = '#cc6'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(x, p.MT); ctx.lineTo(x, p.MT + p.ph);          // column
+  ctx.moveTo(p.ML, y); ctx.lineTo(p.W - p.MR, y);           // line
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // point marker
+  ctx.fillStyle = '#ff5'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x, y, 3.5, 0, 2 * Math.PI); ctx.fill(); ctx.stroke();
+
+  // readout label, kept inside the plot area
+  let txt = freq.toFixed(3) + ' MHz   ' + pwr.toFixed(1) + ' dBm';
+  ctx.font = '12px sans-serif'; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  let padX = 6, padY = 4, lh = 14;
+  let tw = ctx.measureText(txt).width;
+  let bw = tw + 2 * padX, bh = lh + 2 * padY;
+  let bx = x + 10, by = y - bh - 8;
+  if (bx + bw > p.W - p.MR) bx = x - bw - 10;               // flip left near right edge
+  if (bx < p.ML) bx = p.ML;
+  if (by < p.MT) by = y + 10;                               // drop below near top
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = '#cc6'; ctx.strokeRect(bx, by, bw, bh);
+  ctx.fillStyle = '#ffd';
+  ctx.fillText(txt, bx + padX, by + padY);
+}
+
+async function poll() {
+  try {
+    let r = await fetch('/spectrum.json', { cache: 'no-store' });
+    let j = await r.json();
+
+    if (j.autoscan) {
+      banner.style.display = 'block';
+      if (j.status === 'rx') {
+        banner.textContent = 'Auto-scan locked — receiving ' +
+          (j.rxname ? ('"' + j.rxname + '" ') : '') + 'on ' +
+          (j.rxfreq != null ? j.rxfreq.toFixed(3) : '?') + ' MHz.';
+      } else if (j.as_state === 'qrg') {
+        banner.textContent = 'Auto-scan: checking frequency list — ' +
+          (j.as_tryfreq != null ? j.as_tryfreq.toFixed(3) : '?') + ' MHz as ' +
+          (j.as_trytype || '?') + '.';
+      } else if (j.as_state === 'trial') {
+        banner.textContent = 'Auto-scan: trying ' +
+          (j.as_tryfreq != null ? j.as_tryfreq.toFixed(3) : '?') + ' MHz as ' +
+          (j.as_trytype || '?') + ' — ' + (j.as_npeaks || 0) + ' peak(s) this sweep.';
+      } else {
+        banner.textContent = 'Auto-scan: sweeping for peaks… (' +
+          (j.as_npeaks || 0) + ' found last sweep).';
+      }
+    } else if (j.interval === 0) {
+      banner.style.display = 'block';
+      banner.textContent = 'Scan plot disabled — set "scanplotint" > 0 (seconds) to enable.';
+    } else if (j.status === 'rx') {
+      banner.style.display = 'block';
+      banner.textContent = 'Paused — receiving sonde ' +
+        (j.rxname ? ('"' + j.rxname + '" ') : '') + 'on ' +
+        (j.rxfreq != null ? j.rxfreq.toFixed(3) : '?') + ' MHz.';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    info.textContent = j.n + ' bins, ' + (j.step * 1000).toFixed(1) +
+      ' kHz/bin, interval ' + j.interval + 's';
+
+    if (j.seq !== lastSeq && j.n >= 2) {        // fresh scan -> redraw
+      lastSeq = j.seq;
+      lastJson = j;
+      let when = new Date(Date.now() - (j.age_ms || 0));
+      stamp.textContent = 'Latest Scan: ' + when.toLocaleString();
+      draw();
+    }
+  } catch (e) {
+    info.textContent = 'fetch error: ' + e;
+  } finally {
+    setTimeout(poll, POLL_MS);
+  }
+}
+// ---- zoom / pan -------------------------------------------------------------
+// The visible window lives in bin-index space (`view`). Every gesture maps a
+// pixel position to a bin index via the cached plot geometry, adjusts the
+// window, and redraws. draw() clamps the window, so handlers can be loose.
+const MINSPAN_BINS = 8;       // smallest zoom span (closest zoom-in)
+
+function cssX(clientX) {       // clientX -> canvas CSS-pixel x
+  let rect = cv.getBoundingClientRect();
+  return (clientX - rect.left) * (cv.clientWidth / rect.width);
+}
+function isZoomed() { return view !== null; }
+function setView(lo, hi) {
+  let n = plot ? plot.n : 0;
+  if (!n) return;
+  view = (lo <= 0 && hi >= n - 1) ? null : { lo, hi };
+}
+function resetView() { if (view) { view = null; draw(); } }
+
+// zoom by `factor` (>1 = zoom in) keeping the bin under `centerX` fixed on screen
+function zoomAt(centerX, factor) {
+  if (!plot) return;
+  let n = plot.n;
+  let lo = view ? view.lo : 0, hi = view ? view.hi : n - 1, span = hi - lo;
+  let anchor = lo + (centerX - plot.ML) / plot.pw * span, frac = (anchor - lo) / span;
+  let newSpan = Math.max(MINSPAN_BINS, Math.min(n - 1, span / factor));
+  lo = anchor - frac * newSpan; hi = lo + newSpan;
+  if (lo < 0) { lo = 0; hi = newSpan; }
+  if (hi > n - 1) { hi = n - 1; lo = hi - newSpan; }
+  setView(lo, hi); draw();
+}
+
+// drag-pan: keep the span fixed, shift the window by the cursor's pixel delta
+let mPanning = false, panX0 = 0, panLo0 = 0, panHi0 = 0;
+function armPan(x) {
+  panX0 = x;
+  panLo0 = view ? view.lo : 0;
+  panHi0 = view ? view.hi : (plot ? plot.n - 1 : 0);
+}
+function doPan(x) {
+  if (!plot) return;
+  let n = plot.n, span = panHi0 - panLo0;
+  let dxBins = (x - panX0) / plot.pw * span;
+  let lo = panLo0 - dxBins, hi = panHi0 - dxBins;
+  if (lo < 0) { lo = 0; hi = span; }
+  if (hi > n - 1) { hi = n - 1; lo = hi - span; }
+  setView(lo, hi); draw();
+}
+
+// ---- mouse (desktop): wheel zoom, drag pan, hover crosshair, dbl-click reset
+cv.addEventListener('mousemove', ev => {
+  if (mPanning) { doPan(cssX(ev.clientX)); return; }
+  drawCrosshair(ev);
+  cv.style.cursor = isZoomed() ? 'grab' : 'crosshair';
+});
+cv.addEventListener('mousedown', ev => {
+  if (!isZoomed()) return;                       // nothing to pan at full view
+  ev.preventDefault();
+  mPanning = true; armPan(cssX(ev.clientX)); cv.style.cursor = 'grabbing';
+});
+window.addEventListener('mouseup', () => {
+  if (mPanning) { mPanning = false; cv.style.cursor = isZoomed() ? 'grab' : 'crosshair'; }
+});
+cv.addEventListener('mouseleave', () => { if (plot) ctx.putImageData(plot.snapshot, 0, 0); });
+cv.addEventListener('wheel', ev => {
+  if (!plot) return;
+  ev.preventDefault();
+  zoomAt(cssX(ev.clientX), ev.deltaY < 0 ? 1.25 : 1 / 1.25);
+}, { passive: false });
+cv.addEventListener('dblclick', ev => { ev.preventDefault(); resetView(); });
+
+// ---- touch (mobile): pinch zoom, drag pan when zoomed, tap crosshair --------
+let pinch0 = null;                               // {dist, lo, hi, midX} at pinch start
+let tStartCX = 0, tStartCY = 0, tStartX = 0, tMoved = false, lastTapMs = 0;
+
+function onTouchStart(ev) {
+  if (!plot) return;
+  if (ev.touches.length >= 2) {                  // begin pinch
+    ev.preventDefault();
+    let a = ev.touches[0], b = ev.touches[1];
+    pinch0 = {
+      dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+      lo: view ? view.lo : 0, hi: view ? view.hi : plot.n - 1,
+      midX: cssX((a.clientX + b.clientX) / 2)
+    };
+    ctx.putImageData(plot.snapshot, 0, 0);       // drop any crosshair while zooming
+    return;
+  }
+  let t = ev.touches[0];
+  tStartCX = t.clientX; tStartCY = t.clientY; tStartX = cssX(t.clientX); tMoved = false;
+  if (isZoomed()) {
+    armPan(tStartX);                             // baseline for a possible drag-pan
+  } else {
+    ev.preventDefault();
+    drawCrosshair(ev);                           // full view: crosshair follows touch
+  }
+}
+function onTouchMove(ev) {
+  if (!plot) return;
+  if (pinch0 && ev.touches.length >= 2) {        // pinch -> zoom frequency
+    ev.preventDefault();
+    let a = ev.touches[0], b = ev.touches[1];
+    let dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    let n = plot.n, span0 = pinch0.hi - pinch0.lo;
+    let anchor = pinch0.lo + (pinch0.midX - plot.ML) / plot.pw * span0;
+    let frac = (anchor - pinch0.lo) / span0;
+    let newSpan = Math.max(MINSPAN_BINS, Math.min(n - 1, span0 / (dist / pinch0.dist)));
+    let lo = anchor - frac * newSpan, hi = lo + newSpan;
+    if (lo < 0) { lo = 0; hi = newSpan; }
+    if (hi > n - 1) { hi = n - 1; lo = hi - newSpan; }
+    setView(lo, hi); draw();
+    return;
+  }
+  if (ev.touches.length !== 1) return;
+  let t = ev.touches[0];
+  if (Math.abs(t.clientX - tStartCX) > 8 || Math.abs(t.clientY - tStartCY) > 8) tMoved = true;
+  ev.preventDefault();
+  if (!isZoomed()) drawCrosshair(ev);            // full view: crosshair follows
+  else if (tMoved) doPan(cssX(t.clientX));       // zoomed: drag pans
+}
+function onTouchEnd(ev) {
+  if (pinch0 && ev.touches.length < 2) {         // pinch ended
+    pinch0 = null;
+    if (ev.touches.length === 1) {               // one finger remains -> re-arm single track
+      let t = ev.touches[0];
+      tStartCX = t.clientX; tStartCY = t.clientY; tStartX = cssX(t.clientX); tMoved = false;
+      if (isZoomed()) armPan(tStartX);
+    }
+    return;
+  }
+  if (ev.touches.length > 0) return;             // other fingers still down
+  if (!tMoved) {                                 // a tap (not a drag)
+    let now = Date.now();
+    if (now - lastTapMs < 300) { resetView(); lastTapMs = 0; }   // double-tap -> reset
+    else { lastTapMs = now; if (isZoomed()) drawCrosshair(ev); } // tap -> crosshair when zoomed
+  }
+}
+cv.addEventListener('touchstart', onTouchStart, { passive: false });
+cv.addEventListener('touchmove', onTouchMove, { passive: false });
+cv.addEventListener('touchend', onTouchEnd);
+cv.addEventListener('touchcancel', () => { pinch0 = null; mPanning = false; });
+
+window.addEventListener('resize', draw);
+poll();
+</script>
+</body>
+</html>

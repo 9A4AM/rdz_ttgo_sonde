@@ -11,6 +11,7 @@ public:
     void netshutdown();
     void updateSonde( SondeInfo *si );
     void updateStation( PosInfo *pi );
+    bool replayReady();
     void updateQRG( int nextIndex );
     String getStatus();
     String getName();

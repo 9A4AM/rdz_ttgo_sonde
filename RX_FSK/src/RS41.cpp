@@ -529,7 +529,15 @@ static uint32_t rs41date(const uint8_t f[])
 
 void ProcessSubframe( byte *subframeBytes, int subframeNumber ) {
    // the total subframe consists of 51 rows, each row 16 bytes
-   // based on https://github.com/bazjo/RS41_Decoding/tree/master/RS41-SGP#Subframe 
+   // based on https://github.com/bazjo/RS41_Decoding/tree/master/RS41-SGP#Subframe
+   // subframeNumber comes straight from the (RS-corrected) frame and can be any
+   // value 0..255 on a malformed/garbage frame; rawData only holds 51 rows and
+   // valid is a 64-bit mask, so reject out-of-range numbers to avoid a heap
+   // buffer overflow and undefined-behaviour shift.
+   if( subframeNumber < 0 || subframeNumber >= 51 ) {
+      Serial.printf("ProcessSubframe: ignoring out-of-range subframe number %d\n", subframeNumber);
+      return;
+   }
    struct subframeBuffer *s = (struct subframeBuffer *)sonde.si()->extra;
    // Allocate on demand
    if(!s) {
@@ -722,6 +730,15 @@ int RS41::decode41(byte *data, int maxlen)
 	char buf[128];	
 	int crcok = 1, serialok = 0;
 	SondeData *si = &(sonde.si()->d);
+
+	// Mark the position as not-yet-refreshed for this frame. posrs41() clears this
+	// (validPos = 0x7f) only when it decodes a genuinely fresh fix. If the '{' pos
+	// subframe fails its CRC (posrs41 is never called) or carries all-zeros, the
+	// 0x80 "position is old" flag survives -- so downstream consumers (live.json /
+	// livemap) can tell this frame's advanced frame number has no matching fresh
+	// position, and won't plot a stale position under a newer frame number. This
+	// only touches the 0x80 bit, not the VALIDPOS low bits used elsewhere.
+	if(si->validPos) si->validPos |= 0x80;
 
 	int32_t corr = reedsolomon41(data, 560, 131);  // try short frame first
 	if(corr<0) {
@@ -989,6 +1006,48 @@ int RS41::getSubtype(char *buf, int buflen, SondeInfo *si) {
 	buf[buflen-1]=0;
 	if(*buf==0) return -1;
 	Serial.printf("subframe valid: %x%08x; subtype=%s\n", (uint32_t)(sf->valid>>32), (uint32_t)sf->valid, buf);
+	return 0;
+}
+
+// Sonde-reported TX frequency, encoded at offset 0x002 (subframe block 0).
+// Decoded the same way as rs1729 rs41mod.c get_Calconf() / auto_rx, so the
+// value matches what other receivers report for the same sonde:
+//   freq[kHz] = 400000 + 40*hibyte + (lobyte & 0xC0)*10/64
+// (high byte = 40 kHz steps, top 2 bits of low byte = 10 kHz fine step).
+// Returns 0 on success.
+int RS41::getTxFrequencyMHz(float *freq, SondeInfo *si) {
+	struct subframeBuffer *sf = (struct subframeBuffer *)si->extra;
+	if(!sf) return -1;
+	if( !(sf->valid & 1ULL) ) return -1;   // block 0 not yet received
+	uint16_t f = sf->value.frequency;
+	if(f==0) return -1;
+	uint8_t lo = f & 0xFF, hi = (f >> 8) & 0xFF;
+	int freq_kHz = 400000 + 40 * hi + ((lo & 0xC0) * 10) / 64;
+	*freq = freq_kHz / 1000.0f;
+	return 0;
+}
+
+// Mainboard type string (e.g. "RSM412") at offset 0x222 (subframe block 0x22).
+int RS41::getMainboard(char *buf, int buflen, SondeInfo *si) {
+	struct subframeBuffer *sf = (struct subframeBuffer *)si->extra;
+	if(!sf) return -1;
+	if( !(sf->valid & (1ULL<<0x22)) ) return -1;   // block 0x22 not yet received
+	if(buflen>11) buflen=11;
+	strncpy(buf, (const char *)sf->value.names.mainboard, buflen);
+	buf[buflen-1]=0;
+	if(*buf==0) return -1;
+	return 0;
+}
+
+// Mainboard firmware version (10000*major + 100*minor + patch) at offset 0x015
+// (subframe block 1).
+int RS41::getMainboardFW(uint32_t *fw, SondeInfo *si) {
+	struct subframeBuffer *sf = (struct subframeBuffer *)si->extra;
+	if(!sf) return -1;
+	if( !(sf->valid & (1ULL<<1)) ) return -1;   // block 1 not yet received
+	uint16_t v = sf->value.firmwareVersion;
+	if(v==0) return -1;
+	*fw = v;
 	return 0;
 }
 

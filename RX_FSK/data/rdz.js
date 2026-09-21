@@ -47,6 +47,47 @@ function footer() {
   }); 
 }
 
+/* Upload a local file to LittleFS, forcing its on-device name (e.g. qrg.txt / config.txt),
+   then reboot so the device re-reads it. Used by the qrg.html and config.html forms in
+   RX_FSK.ino. 'what' is a human description used in the confirmation prompt.
+   Relies on showConfirm()/showProgress()/waitForRebootAndReload() from dialog.js. */
+function uploadCfgFile(inputId, dest, what) {
+  var inp = document.getElementById(inputId);
+  if (!inp || !inp.files || inp.files.length === 0) {
+    showAlert("Please choose a file first.");
+    return;
+  }
+  var f = inp.files[0];
+  showConfirm("This will replace the entire " + what + " on the device with the contents of \"" +
+              f.name + "\".\n\nThe device will reboot to apply the change. Continue?")
+    .then(function (ok) {
+      if (!ok) return;
+      var fd = new FormData();
+      fd.append("file", f, dest);   // force the destination filename regardless of the picked file's name
+      var dlg = showProgress("Uploading " + dest + "…", "Updating " + what);
+      // Capture the current boot nonce so the reboot can be detected afterwards.
+      fetch("/bootid", { cache: "no-store" })
+        .then(function (r) { return r.ok ? r.text() : ""; })
+        .catch(function () { return ""; })
+        .then(function (before) {
+          return fetch("/file", { method: "POST", body: fd })
+            .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); })
+            .then(function () {
+              // Trigger the reboot; the device restarts immediately, so this won't get a response.
+              fetch("/control.html", {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                body: "reboot=1"
+              }).catch(function () {});
+              // Swap the dialog to the reboot watcher, which reloads once the device is back.
+              waitForRebootAndReload((before || "").trim(), "Updating " + what,
+                "The " + what + " was uploaded. The device is rebooting to apply it.");
+            });
+        })
+        .catch(function (e) { dlg.close(); showAlert("Upload failed: " + e.message); });
+    });
+}
+
 /* Used by qrg.html in RX_FSK.ino */
 function prep() {
   var stlist=document.querySelectorAll("input.stype");

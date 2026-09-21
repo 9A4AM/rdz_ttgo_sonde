@@ -218,6 +218,12 @@ void Sonde::defaultConfig() {
 	config.sd.clk = -1;
 	config.sd.name = 0;
 	config.sd.speed = 4000000;
+	config.serialout.format = 0;      // 0=off (feature disabled by default)
+	config.serialout.txd = 4;         // pre-configured TX pin: GPIO4 is the only free, output-capable,
+	                                  // header-exposed pin on the TTGO LoRa32 T3 (not used by LoRa/OLED/SD/LED,
+	                                  // not strapping/flash/input-only). pinInUse() auto-disables it on boards
+	                                  // that do use GPIO4 (e.g. old v1 / CYD).
+	config.serialout.baud = 9600;
 	config.disptype = 0;
 	config.dispcontrast = -1;
 	config.tft_orient = 1;
@@ -370,13 +376,31 @@ void Sonde::defaultConfig() {
 	config.maxsonde=15;
 	config.debug=0;
 	config.wifi=1;
+	config.cachesize = 120;
 	config.display[0]=0;
 	config.display[1]=1;
 	config.display[2]=-1;
 	config.startfreq=400;
+	config.scanplotint=60;
+	config.scan_smooth=-1;          // use per-display default
+	config.scan_addwait=-1;         // use per-display default
+	config.scan_iter=6;             // full sweeps per scan (max RSSI kept; spans >1s for RS41)
+	// Auto-scan defaults (mirror radiosonde_auto_rx's scanner where applicable)
+	config.autoscan_enable=0;       // off: use the configured channel list
+	config.autoscan_snr=10;         // dB above noise floor
+	config.autoscan_mindist=1000;   // Hz
+	config.autoscan_quant=10000;    // Hz (10 kHz channel steps)
+	config.autoscan_maxpeaks=10;    // peaks per sweep
+	config.autoscan_dwell=12;       // s per peak (~2.4 s/type with 5 types; enough for RS41)
+	config.autoscan_typedwell=0;    // 0 = derive per-type time from autoscan_dwell
+	config.autoscan_qrgfirst=1;     // on: each cycle try active channel-list QRGs before spectrum peaks
+	config.autoscan_exclude[0]=0;   // no excluded (known-noise) frequencies by default
+	config.allowfileupload=0;
 	config.channelbw=10;
 	config.marker=0;
 	config.freqofs=0;
+	config.lnaboost=1;	// most setups have no external LNA -> enable LNA current boost by default
+	config.lnagain=0;	// no external LNA gain correction by default
 	config.rs41.agcbw=12500;
 	config.rs41.rxbw=6300;
 	config.rs92.rxbw=12500;
@@ -410,6 +434,13 @@ void Sonde::defaultConfig() {
 	config.ss.active = 1;
  	config.ss.port = 62655;
  	strcpy(config.ss.host, "239.255.0.1");
+
+	config.notify.active = 0;
+	config.notify.dist = 10;
+	config.notify.alt = 5;
+	strcpy(config.notify.server, "http://ntfy.sh");
+	config.notify.topic[0] = 0;
+	config.notify.token[0] = 0;
 }
 
 extern struct st_configitems config_list[];
@@ -469,7 +500,9 @@ void Sonde::setConfig(const char *cfg) {
 		{
 			int idx = 0;
 			char *ptr;
-			while(val) {
+			// config.display is int8_t[30]; leave room for the -1 terminator
+			int dispmax = (int)(sizeof(config.display)/sizeof(config.display[0])) - 1;
+			while(val && idx < dispmax) {
 				ptr = strchr(val,',');
 				if(ptr) *ptr = 0;
 				config.display[idx++] = atoi(val);
@@ -551,6 +584,7 @@ void Sonde::nextRxSonde() {
 }
 void Sonde::nextRxFreq(int addkhz) {
 	// last entry is for the variable frequency
+	if(nSonde < 1) return;	// no channels (empty/all-malformed qrg.txt) => avoid sondeList[-1]
 	rxtask.currentSonde = nSonde - 1;
 	sondeList[rxtask.currentSonde].active = 1;
 	sondeList[rxtask.currentSonde].freq += addkhz*0.001;
@@ -563,7 +597,9 @@ SondeInfo *Sonde::si() {
 }
 
 void Sonde::setup() {
-	if(rxtask.currentSonde<0 || rxtask.currentSonde>=config.maxsonde) {
+	// MAXSONDE is the spare last slot reserved for the auto-scan scratch entry; accept it
+	// even though it is outside the configured range [0,maxsonde).
+	if(rxtask.currentSonde<0 || (rxtask.currentSonde>=config.maxsonde && rxtask.currentSonde!=MAXSONDE)) {
 		LOG_E(TAG, "Invalid rxtask.currentSonde: %d\n", rxtask.currentSonde);
 		rxtask.currentSonde = 0;
 		for(int i=0; i<config.maxsonde - 1; i++) {
@@ -672,6 +708,14 @@ void Sonde::receive() {
 		if(action==ACT_DISPLAY_SCANNER) {
 			// nothing to do here, be re-call setup() for M10/M20 for repeating AFC
 		}
+		else if(config.autoscan_enable) {
+			// Auto-scan holds the locked sonde on the scratch slot for norx_timeout
+			// (see loopDecoder); the return to scanning is driven solely by that timer.
+			// Don't cycle the channel list on a display timeout here -- otherwise the
+			// radio retunes and the display / livemap show the QRG channels being
+			// scanned during the hold window instead of the locked sonde.
+			action = ACT_NONE;
+		}
 		else {
 			if(action==ACT_NEXTSONDE||action==ACT_PREVSONDE)
 				nextRxSonde();
@@ -679,7 +723,7 @@ void Sonde::receive() {
 				nextRxFreq( action-64 );
 			action = ACT_SONDE(rxtask.currentSonde);
 		}
-		if(rxtask.activate==-1) {
+		if(rxtask.activate==-1 && action!=ACT_NONE) {
 			// race condition here. maybe better use mutex. TODO
 			rxtask.activate = ACT_SONDE(rxtask.currentSonde);
 		}
@@ -688,6 +732,34 @@ void Sonde::receive() {
 	res = (action<<8) | (res&0xff);
 	// let waitRXcomplete resume...
 	rxtask.receiveResult = res;
+}
+
+// Tune+decode one frame for the current entry, no event/timeout/display handling.
+// Caller must have set rxtask.currentSonde / sondeList[...] and called setup().
+uint16_t Sonde::rxRawFrame() {
+	uint16_t res = RX_TIMEOUT;
+	switch(sondeList[rxtask.currentSonde].type) {
+	case STYPE_RS41:
+		res = rs41.receive();
+		break;
+	case STYPE_RS92:
+#if FEATURE_RS92
+		res = rs92.receive();
+#endif
+		break;
+	case STYPE_M10:
+	case STYPE_M20:
+	case STYPE_M10M20:
+		res = m10m20.receive();
+		break;
+	case STYPE_DFM:
+		res = dfm.receive();
+		break;
+	case STYPE_MP3H:
+		res = mp3h.receive();
+		break;
+	}
+	return res;
 }
 
 // return (action<<8) | (rxresult)

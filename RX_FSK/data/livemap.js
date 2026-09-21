@@ -35,14 +35,17 @@ $(document).ready(function(){
   });
   
   var basemap;
-  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  var themeDark = (window.rdzTheme && window.rdzTheme.effective() === 'dark')
+               || (!window.rdzTheme && window.matchMedia
+                   && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  if (themeDark) {
     map.addLayer(osmdark);
     basemap='osmdark';
   } else {
     map.addLayer(osmlight);
     basemap='osmlight';
   }
-  
+
   basemap_change = function () {
     if (basemap == 'osmlight') {
       map.removeLayer(osmlight);
@@ -63,7 +66,20 @@ $(document).ready(function(){
     }
   };
 
-  if(mapcenter) map.setView(mapcenter, 5); 
+  /* Follow the theme switch, but only while the user is on a plain OSM layer --
+     if they deliberately picked opentopo or esri, leave their choice alone. */
+  if (window.rdzTheme) {
+    window.rdzTheme.onChange(function (theme) {
+      var want = (theme === 'dark') ? 'osmdark' : 'osmlight';
+      if (basemap === want) return;
+      if (basemap !== 'osmlight' && basemap !== 'osmdark') return;
+      map.removeLayer(basemap === 'osmlight' ? osmlight : osmdark);
+      map.addLayer(want === 'osmdark' ? osmdark : osmlight);
+      basemap = want;
+    });
+  }
+
+  if(mapcenter) map.setView(mapcenter, 5);
   else map.setView([51.163361,10.447683], 5); // Mitte DE
 
 var reddot = '<span class="ldot rbg"></span>';
@@ -104,7 +120,7 @@ headtxt = function(data,stat) {
     $('#sonde_climb').html(data.climb);
     $('#sonde_speed').html( mr(data.speed * 3.6 * 10) / 10 );
     $('#sonde_dir').html(data.dir);
-    $('#sonde_time').html(new Date(data.time * 1000).toISOString());
+    $('#sonde_time').html(localtime(data.time));
     $('#sonde_rssi').html(data.rssi / 2 );
     $('#sonde_detail').show();
   } else {
@@ -135,8 +151,23 @@ map.addControl(new L.Control.Button([
 
 map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', href: 'javascript:show_settings();' } ]));
 
-  
-    
+  /* The floating fallback would sit on top of Leaflet's own controls: every corner of this map
+     is occupied (back/zoom/basemap topleft, status/balloon/settings topright, scale bottomleft,
+     attribution bottomright). Hand the switch to Leaflet's control layout instead, so it is
+     placed in flow below the top-right stack and cannot overlap anything. */
+  var themeSw = document.getElementById('themeSwitch');
+  var trCorner = document.querySelector('#map .leaflet-control-container .leaflet-top.leaflet-right');
+  if (themeSw && trCorner) {
+    themeSw.classList.remove('themetoggle-floating');
+    var themeBox = L.DomUtil.create('div', 'leaflet-control');
+    themeBox.appendChild(themeSw);
+    trCorner.appendChild(themeBox);
+    L.DomEvent.disableClickPropagation(themeBox);
+    L.DomEvent.disableScrollPropagation(themeBox);
+  }
+
+
+
   show = function(e,p) {
     if (p == 'landing') { get_predict(last_data); }
     if (e) {
@@ -177,8 +208,9 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
   icon_landing = L.divIcon({className: 'leaflet-landing'});
   dots_predict = [];
   line_predict = [];
-  marker_burst = []; 
+  marker_burst = [];
   icon_burst = L.divIcon({className: 'leaflet-burst'});
+  poweroff = {};   // cached absolute power-off time (s epoch) per sonde id
 
   marker = [];
   dots = [];
@@ -189,7 +221,11 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
     if (data.id) {
       last_id = data.id;
       // data.res: 0: ok  1: no rx (timeout), 2: crc err, >2 some other error
-      if ((data.lat && data.lon && data.alt) && (lastframe != 0)) {
+      // Skip plotting when the firmware flags the position as old (validPos & 0x80):
+      // on weak signal a frame number can advance without a fresh fix, and the kept
+      // (older) position must not be plotted as if it were the newest frame. Firmware
+      // without validPos yields (undefined & 0x80)==0, so nothing is skipped there.
+      if ((data.lat && data.lon && data.alt) && (lastframe != 0) && !(data.validPos & 0x80)) {
         var location = [data.lat,data.lon,data.alt];
         if (!marker[data.id]) {
           map.setView(location, 14);
@@ -205,8 +241,8 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
         }
         if (!dots[data.id]) { dots[data.id] = []; }
         dots[data.id].push(location);
-        if (!line[data.id]) { 
-          line[data.id] = L.polyline(dots[data.id]).addTo(map);
+        if (!line[data.id]) {
+          line[data.id] = L.polyline(dots[data.id], {sondeid: data.id}).addTo(map).on('click', line_click);
         } else {
           line[data.id].setLatLngs(dots[data.id]);
         }
@@ -321,15 +357,16 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
       $("#settings").slideUp();
       get_predict(last_data);
     } else {
-      alert('Error: only numeric values allowed!');
+      showAlert('Error: only numeric values allowed!');
     }
   };
-  
+
   settings_reset = function() {
-    if (confirm('Reset to default?')) {
+    showConfirm('Reset to default?').then(function(ok) {
+      if (!ok) return;
       settings_write(settings_std);
       show_settings();
-    }
+    });
   };
 
   show_settings = function() {
@@ -376,13 +413,13 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
 
     if (!marker_landing[data.id]) {
       marker_landing[data.id] = L.marker(landing_location,{icon: icon_landing}).addTo(map)
-      .bindPopup(poptxt('landing',landing),{closeOnClick:false, autoPan:false});
+      .bindPopup(poptxt('landing',landing,data.id),{closeOnClick:false, autoPan:false});
     } else {
       marker_landing[data.id].slideTo(landing_location, {
           duration: 500,
           keepAtCenter: (follow=='landing')?true:false
       })
-      .setPopupContent(poptxt('landing',landing));
+      .setPopupContent(poptxt('landing',landing,data.id));
     }
 
     dots_predict[data.id]=[];
@@ -428,7 +465,64 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
     return lon;
   }  
 
-  poptxt = function(t,i) {
+  // Receiver position for the "Route" link: prefer the live GPS fix, else fall back to
+  // the configured/served map center (posInfo). Returns [lat, lon] or null.
+  receiverpos = function() {
+    if (typeof gps_location !== 'undefined' && gps_location && gps_location.length == 2) { return gps_location; }
+    if (typeof mapcenter !== 'undefined' && mapcenter && mapcenter.length == 2) { return mapcenter; }
+    return null;
+  };
+
+  // "Open in <external map>" link row, shared by the sonde/predict popups and the
+  // trail-point popup (line_click) so all links stay defined in one place.
+  openlinks = function(lat, lon) {
+    var links = '<b>Open:</b> <a href="https://www.google.de/maps/?q='+lat+', '+lon+'" target="_blank">GMaps</a> | <a href="https://www.openstreetmap.org/?mlat='+lat+'&mlon='+lon+'&zoom=15" target="_blank">OSM</a> | <a href="https://topographic-map.com/world/?popup='+lat+','+lon+'&center='+lat+','+lon+'&zoom=15&base=5" target="_blank">Topo</a> | <a href="geo://'+lat+','+lon+'">GeoApp</a>';
+    // Driving route from the receiver to this point (needs a known receiver position).
+    var rx = receiverpos();
+    if (rx) {
+      links += ' | <a href="https://www.google.de/maps/dir/'+rx[0]+','+rx[1]+'/'+lat+','+lon+'" target="_blank">Route</a>';
+    }
+    return links;
+  };
+
+  // Popup content for a clicked trail point, built from that point's stored frame
+  // (see line_click). Each field is guarded so partial frames still render.
+  trailpoptxt = function(f) {
+    var lat = Math.round(f.lat * 1000000) / 1000000;
+    var lon = Math.round(sanitize_lon(f.lon) * 1000000) / 1000000;
+    var rows = '<b>Position:</b> '+lat+',  '+lon+'<br />';
+    if (f.alt || f.alt === 0)     { rows += '<b>Altitude:</b> '+mr(f.alt)+' m<br />'; }
+    if (f.speed || f.speed === 0) { rows += '<b>Speed:</b> '+(mr(f.speed * 3.6 * 10) / 10)+' km/h'+((f.dir || f.dir === 0) ? ' '+f.dir+'°' : '')+'<br />'; }
+    if (f.climb || f.climb === 0) { rows += '<b>Climb:</b> '+f.climb+' m/s<br />'; }
+    if (f.rssi || f.rssi === 0)   { rows += '<b>Signal:</b> -'+(f.rssi / 2)+' dBm<br />'; }
+    // f.time = the frame's GPS timestamp (when the sonde was at this point).
+    if (f.time) { rows += '<b>Time:</b> '+localtime(f.time)+'<br />'; }
+    return '<div class="i_position"><b>〰️ Trail point</b><br />'+rows+openlinks(lat,lon)+'</div>';
+  };
+
+  // Trail (polyline) click handler. e.latlng is the raw clicked coordinate; find the
+  // stored frame nearest to it -- for the sonde whose trail was clicked (options.sondeid)
+  // -- and show its telemetry. Session storage is the per-frame source of truth, so this
+  // works for both the live trail and a trail restored after reboot.
+  line_click = function(e) {
+    var id = e.target.options.sondeid;
+    var frames = storage_read();
+    if (!frames) { return; }
+    var best = null, bestd = Infinity;
+    frames.forEach(function(f) {
+      if (f.id == id && f.lat && f.lon) {
+        var d = e.latlng.distanceTo(L.latLng(f.lat, f.lon));
+        if (d < bestd) { bestd = d; best = f; }
+      }
+    });
+    if (!best) { return; }
+    L.popup({closeOnClick:true, autoPan:false})
+      .setLatLng(L.latLng(best.lat, best.lon))
+      .setContent(trailpoptxt(best))
+      .openOn(map);
+  };
+
+  poptxt = function(t,i,id) {
     var lat_input = (i.id)?i.lat:i.latitude;
     var lon_input = sanitize_lon((i.id)?i.lon:i.longitude);
 
@@ -436,22 +530,73 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
     var lon = Math.round(lon_input * 1000000) / 1000000;
 
     var add =
-    '<br /><b>Position:</b> '+lat+',  '+lon+'<br />'+
-    '<b>Open:</b> <a href="https://www.google.de/maps/?q='+lat+', '+lon+'" target="_blank">GMaps</a> | <a href="https://www.openstreetmap.org/?mlat='+lat+'&mlon='+lon+'&zoom=15" target="_blank">OSM</a> | <a href="geo://'+lat+','+lon+'">GeoApp</a>';
+    '<br /><b>Position:</b> '+lat+',  '+lon+'<br />'+openlinks(lat,lon);
 
-    if (t == 'position') { return '<div class="i_position"><b>🎈 '+i.id+'</b>'+add+'</div>'; }
-    if (t == 'burst') { return '<div class="i_burst"><b>💥 Predicted Burst:</b><br />'+fd(i.datetime)+' at '+mr(i.altitude)+'m'+add+'</div>'; }
+    if (t == 'position') {
+      // RS41 shutdown ("kill") timer: countKT = seconds until power-off as of
+      // frame crefKT. While a kill-timer frame is fresh (crefKT > 0 and within
+      // ~51 frames, as in aprs.cpp / SondeHub; 0xffff = disabled) anchor the
+      // fixed absolute power-off moment. Anchor on the frame's OWN time (i.time,
+      // the GPS epoch of frame vframe) -- NOT the browser clock: after signal
+      // loss live.json keeps returning the last frame, so both i.time and rem
+      // are frozen and i.time+rem stays put. Anchoring on now()+rem instead
+      // would treat that stale frame as received "now", so the absolute time
+      // drifted forward on every poll / page reload (the in-memory cache is
+      // wiped by F5). i.time+rem is reload- and poll-stable, so recomputing it
+      // every time is fine. Other sonde types never set these, so nothing shows.
+      var off = '';
+      if (i.crefKT > 0 && i.countKT != 65535 && i.time > 0
+          && ((i.vframe - i.crefKT) & 0xffff) < 51) {
+        var rem = i.countKT - ((i.vframe - i.crefKT) & 0xffff);
+        if (rem < 0) { rem = 0; }
+        poweroff[i.id] = i.time + rem;
+      }
+      // Derive the live countdown from that fixed moment so "in" and "at" always
+      // agree, and "in" keeps ticking down between frames / after signal loss.
+      if (poweroff[i.id]) {
+        var left = poweroff[i.id] - Math.floor(new Date().getTime() / 1000);
+        if (left < 0) { left = 0; }
+        off = '<br /><b>🔌 Power off in:</b> ' + hms(left) + '<br />at ' + localtime(poweroff[i.id]);
+      }
+      return '<div class="i_position"><b>🎈 '+i.id+'</b>'+off+add+'</div>';
+    }
+    if (t == 'burst') { return '<div class="i_burst"><b>💥 Predicted Burst:</b><br />'+fdl(i.datetime)+' at '+mr(i.altitude)+'m'+add+'</div>'; }
     if (t == 'highest') { return '<div class="i_burst"><b>💥 Burst:</b> '+mr(i.altitude)+'m'+add+'</div>';}
-    if (t == 'landing') { return '<div class="i_landing"><b>🎯 Predicted Landing:</b><br />'+fd(i.datetime)+' at '+mr(i.altitude)+'m'+add+'</div>'; }
+    if (t == 'landing') {
+      // append the cached power-off time (see the 'position' branch) right after
+      // the landing time, so it can be compared against when the sonde shuts down.
+      var off = poweroff[id] ? '<br /><b>🔌 Power off at:</b> ' + localtime(poweroff[id]) : '';
+      return '<div class="i_landing"><b>🎯 Predicted Landing:</b><br />'+fdl(i.datetime)+' at '+mr(i.altitude)+'m'+off+add+'</div>';
+    }
     if (t == 'gps') { return '<div class="i_gps">Position: '+(i.lat)+','+(i.lon)+'<br />Altitude: '+i.alt+'m<br />Speed: '+mr(i.speed * 3.6 * 10)/10+'km/h '+i.dir+'°<br />Sat: '+i.sat+' Hdop:'+(i.hdop/10)+'</div>'; }
   };
 
-  fd = function(date) {
-    var d = new Date(Date.parse(date));
-    return az(d.getUTCHours()) +':'+ az(d.getUTCMinutes())+' UTC';
-  };
+  // Format a predictor datetime string in the browser's local timezone
+  // (full date/time + UTC offset).
+  fdl = function(date) { return localtime(Date.parse(date) / 1000); };
   az = function(n) { return (n<10)?'0'+n:n; };
   mr = function(n) { return Math.round(n); };
+  // Format a number of seconds as h:mm:ss (no modulo: see the localtime note).
+  hms = function(secs) {
+    var h = Math.floor(secs / 3600);
+    var rem = secs - h * 3600;
+    var m = Math.floor(rem / 60);
+    return h + ':' + az(m) + ':' + az(rem - m * 60);
+  };
+  // Format a unix epoch (seconds) as local date/time in the viewing browser's
+  // timezone, with a UTC offset suffix (e.g. 2026-06-29 12:34:56 UTC-3).
+  localtime = function(epoch) {
+    var d = new Date(epoch * 1000);
+    var off = -d.getTimezoneOffset();   // minutes east of UTC
+    var ao = Math.abs(off);
+    // No modulo here: livemap.js is served through the ESP template engine,
+    // which treats a paired percent-sign as a placeholder and would eat it.
+    var hh = Math.floor(ao / 60);
+    var mm = ao - hh * 60;
+    var tz = 'UTC' + (off < 0 ? '-' : '+') + hh + (mm ? ':' + az(mm) : '');
+    return d.getFullYear() + '-' + az(d.getMonth()+1) + '-' + az(d.getDate()) + ' ' +
+           az(d.getHours()) + ':' + az(d.getMinutes()) + ':' + az(d.getSeconds()) + ' ' + tz;
+  };
 
   storage = (typeof(Storage) !== "undefined")?true:false;
   storage_write = function (data) {
@@ -485,10 +630,28 @@ map.addControl(new L.Control.Button([ { position:'topright', text: '⚙️', hre
   session_storage = storage_read();
   if (session_storage) {
     session_storage.forEach(function(d) {
-      dots.push([d.lat,d.lon,d.alt]);
+      // Rebuild the flight track keyed by sonde id, mirroring draw()'s plot guard
+      // (valid lat/lon/alt, not a stale/kept position). Keying by id -- not a flat
+      // dots.push() -- matches how draw() stores/reads the track (dots[data.id]),
+      // so the restored trail is actually drawn.
+      if (d.id && d.lat && d.lon && d.alt && !(d.validPos & 0x80)) {
+        if (!dots[d.id]) { dots[d.id] = []; }
+        dots[d.id].push([d.lat,d.lon,d.alt]);
+      }
       session_storage_last = d;
     });
-    draw(session_storage_last);
+    for (var sid in dots) {
+      if (!line[sid]) { line[sid] = L.polyline(dots[sid], {sondeid: sid}).addTo(map).on('click', line_click); }
+    }
+    if (session_storage_last) {
+      // Prime lastframe so draw()'s plot guard (lastframe != 0, line ~197) passes on
+      // this single restore call -- otherwise the marker is never created and the
+      // sonde kept in session storage isn't shown after a reboot. Use -1 (nonzero and
+      // != the frame's own vframe) so headtxt() still populates the header, then resets
+      // lastframe to the real vframe.
+      lastframe = -1;
+      draw(session_storage_last);
+    }
   }
 
   setInterval(get_data,1000);

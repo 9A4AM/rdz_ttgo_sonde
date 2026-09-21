@@ -32,6 +32,8 @@ public:
         /* Called approx 1x / second* */
         void updateStation( PosInfo *pi );
 
+        bool replayReady();
+
 	String getStatus();
 
 	String getName();
