@@ -113,6 +113,20 @@ const char *mainStateStr[] = {"DECODER", "SPECTRUM", "WIFISCAN", "UPDATE", "TOUC
 
 AsyncWebServer server(80);
 
+//AsyncWebServer server(84);
+
+// Set your Static IP address
+//IPAddress local_IP(192, 168, 1, 84);
+// Set your Gateway IP address
+//IPAddress gateway(192, 168, 1, 1);
+
+//IPAddress subnet(255, 255, 0, 0);
+//IPAddress primaryDNS(8, 8, 8, 8);   //optional
+//IPAddress secondaryDNS(8, 8, 4, 4); //optional
+
+
+int Send_telemetry_limit = 1500;
+
 PMU *pmu = NULL;
 SemaphoreHandle_t axpSemaphore;
 extern uint8_t pmu_irq;
@@ -3284,55 +3298,77 @@ void loopDecoder() {
   if (goodFrame && goodPos) connSerialOut.updateSonde(s);
 #endif
 
-  if (frameCache.enabled()) {
+if (frameCache.enabled()) {
     // Cache path: buffer frames worth uploading (valid id+position); network
     // connectors are fed via drainConnectors() (live frame full-fidelity when
     // caught up, cached copies for backfill). Local sinks are written live.
     SondeInfo *live = NULL;
     uint32_t liveSeq = 0;
+
     if (goodFrame && goodPos) {
-      liveSeq = frameCache.push(s);   // buffered even if !connected, to cover WiFi outages too
-      live = s;
+        liveSeq = frameCache.push(s);   // buffered even if !connected, to cover WiFi outages too
+        live = s;
     }
+
 #if FEATURE_SDCARD
     if (goodFrame && connected) connSDCard.updateSonde(s);
 #endif
+
 #if FEATURE_NOTIFY
     // Live-only sink, like the SD card above: the alerts are about the sonde in front of you
     // now, so they must not queue behind a backfill.
     if (goodFrame && goodPos && connected) connNotify.updateSonde(s);
 #endif
-    drainConnectors(live, liveSeq);
-  } else if ((res & 0xff) == 0 && connected) {
+
+    // --- ALTITUDE BLOCK FOR APRS + SONDEHUB WHEN CACHE IS ENABLED ---
+    if (s && s->d.alt <= Send_telemetry_limit) {
+        // Skip APRS and SondeHub only
+        // (other connectors still run normally through drainConnectors)
+        drainConnectors(NULL, liveSeq);   // feed others but without APRS/SondeHub
+    } else {
+        // Normal behavior: send everything
+        drainConnectors(live, liveSeq);
+    }
+
+} else if ((res & 0xff) == 0 && connected) {
     // Direct dispatch, used when the cache is disabled.
     if (goodPos) {
 #if FEATURE_APRS
-      connAPRS.updateSonde(s);
+        if (s->d.alt > Send_telemetry_limit) {  
+            connAPRS.updateSonde(s);
+        }
 #endif
 #if FEATURE_CHASEMAPPER
-      connChasemapper.updateSonde( s );
+        connChasemapper.updateSonde( s );
 #endif
 #if FEATURE_SONDESEEKER
-      connSondeseeker.updateSonde( s );
+        connSondeseeker.updateSonde( s );
 #endif
 #if FEATURE_NOTIFY
-      connNotify.updateSonde( s );
+        connNotify.updateSonde( s );
 #endif
     }
+
 #if FEATURE_SONDEHUB
-    connSondehub.updateSonde( s );   // invoke sh_send_data....
+    if (s->d.alt > Send_telemetry_limit) {  
+        connSondehub.updateSonde( s );   // invoke sh_send_data....
+    }
 #endif
+
 #if FEATURE_MQTT
     connMQTT.updateSonde( s );      // send to MQTT if enabled
 #endif
+
 #if FEATURE_SDCARD
     connSDCard.updateSonde(s);
 #endif
-  } else {
+
+} else {
 #if FEATURE_SONDEHUB
     connSondehub.updateSonde( NULL );
 #endif
-  }
+}
+
 
   // Send own position periodically
 #if FEATURE_MQTT
