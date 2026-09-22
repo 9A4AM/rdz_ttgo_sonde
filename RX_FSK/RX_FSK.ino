@@ -3172,30 +3172,79 @@ static int rdzDataPos = 0;
 void drainConnectors(SondeInfo *live, uint32_t liveSeq) {
   if (!frameCache.enabled()) return;
   uint32_t now = (uint32_t) time(NULL);
-  // Value-initialize: frameCache.get() only fills type/freq/afc/rssi/rxtime/d, so
-  // launchsite/rxStat/extra must start zeroed (empty launchsite, rxStat[0]=0,
-  // extra=NULL) rather than leak stack garbage into replayed payloads.
+
   SondeInfo tmp = {};
+
   for (int i = 0; connectors[i]; i++) {
     Conn *c = connectors[i];
-    if (c->replayCursor < frameCache.oldestSeq()) c->replayCursor = frameCache.oldestSeq();
+
+    if (c->replayCursor < frameCache.oldestSeq())
+      c->replayCursor = frameCache.oldestSeq();
+
     int delivered = 0;
+
     while (delivered < REPLAY_PACE && c->replayReady() && c->replayCursor < frameCache.headSeq()) {
+
+      // --- ALTITUDE BLOCK FOR APRS + SONDEHUB ---
+      // live frame: use live->d.alt
+      // cached frame: use tmp.d.alt (after frameCache.get)
+      bool blockLowAlt = false;
+
       if (live && c->replayCursor == liveSeq) {
-        c->updateSonde(live);         // caught up to the live frame: full fidelity, always fresh
+        // Live frame
+        if (live->d.alt <= Send_telemetry_limit) {
+          blockLowAlt = true;
+        }
+
+        // Skip APRS + SondeHub only
+        if (blockLowAlt && (c == &connAPRS || c == &connSondehub)) {
+          c->replayCursor++;
+          delivered++;
+          continue;
+        }
+
+        // Normal live dispatch
+        c->updateSonde(live);
+
       } else {
-        if (!frameCache.get(c->replayCursor, &tmp)) { c->replayCursor++; continue; }
-        // Age cap, guarded against a backward clock step (rxtime > now => treat as fresh).
+        // Cached frame
+        if (!frameCache.get(c->replayCursor, &tmp)) {
+          c->replayCursor++;
+          continue;
+        }
+
+        // Check altitude on cached frame
+        if (tmp.d.alt <= Send_telemetry_limit) {
+          blockLowAlt = true;
+        }
+
+        // Skip APRS + SondeHub only
+        if (blockLowAlt && (c == &connAPRS || c == &connSondehub)) {
+          c->replayCursor++;
+          delivered++;
+          continue;
+        }
+
+        // Age cap
         uint32_t age = (now >= tmp.rxtime) ? (now - tmp.rxtime) : 0;
-        if (age > MAX_REPLAY_AGE) { c->replayCursor++; continue; }
+        if (age > MAX_REPLAY_AGE) {
+          c->replayCursor++;
+          continue;
+        }
+
+        // Normal cached dispatch
         c->updateSonde(&tmp);
       }
+
       c->replayCursor++;
       delivered++;
     }
-    if (delivered == 0) c->idleTick();
+
+    if (delivered == 0)
+      c->idleTick();
   }
 }
+
 
 void loopDecoder() {
   // Auto-scan mode: hold the peak-detected sonde while it keeps decoding; return
