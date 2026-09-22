@@ -3185,54 +3185,44 @@ void drainConnectors(SondeInfo *live, uint32_t liveSeq) {
 
     while (delivered < REPLAY_PACE && c->replayReady() && c->replayCursor < frameCache.headSeq()) {
 
-      // --- ALTITUDE BLOCK FOR APRS + SONDEHUB ---
-      // live frame: use live->d.alt
-      // cached frame: use tmp.d.alt (after frameCache.get)
       bool blockLowAlt = false;
 
+      // LIVE FRAME
       if (live && c->replayCursor == liveSeq) {
-        // Live frame
-        if (live->d.alt <= Send_telemetry_limit) {
-          blockLowAlt = true;
-        }
 
-        // Skip APRS + SondeHub only
+        if (live->d.alt <= Send_telemetry_limit)
+          blockLowAlt = true;
+
         if (blockLowAlt && (c == &connAPRS || c == &connSondehub)) {
           c->replayCursor++;
           delivered++;
           continue;
         }
 
-        // Normal live dispatch
         c->updateSonde(live);
 
       } else {
-        // Cached frame
+        // CACHED FRAME
         if (!frameCache.get(c->replayCursor, &tmp)) {
           c->replayCursor++;
           continue;
         }
 
-        // Check altitude on cached frame
-        if (tmp.d.alt <= Send_telemetry_limit) {
+        if (tmp.d.alt <= Send_telemetry_limit)
           blockLowAlt = true;
-        }
 
-        // Skip APRS + SondeHub only
         if (blockLowAlt && (c == &connAPRS || c == &connSondehub)) {
           c->replayCursor++;
           delivered++;
           continue;
         }
 
-        // Age cap
         uint32_t age = (now >= tmp.rxtime) ? (now - tmp.rxtime) : 0;
         if (age > MAX_REPLAY_AGE) {
           c->replayCursor++;
           continue;
         }
 
-        // Normal cached dispatch
         c->updateSonde(&tmp);
       }
 
@@ -3244,6 +3234,7 @@ void drainConnectors(SondeInfo *live, uint32_t liveSeq) {
       c->idleTick();
   }
 }
+
 
 
 void loopDecoder() {
